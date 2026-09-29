@@ -3,9 +3,6 @@ WM_WS_M - Módulo monitor de la estación de riego (cliente).
 
 Uso:  py WM_WS_M.py [ip_central] [puerto] [id_estacion] [ubicacion...]
       (por defecto localhost 5050; si no se indican ID o ubicación se piden por teclado)
-
-Ejemplo:
-      py WM_WS_M.py 192.168.1.20 5050 WS-04 River Park
 """
 
 import socket
@@ -55,8 +52,8 @@ def construir_trama(*campos):
 
 # ---------------------------------------------------------- CONFIGURACIÓN
 
-HOST = sys.argv[1] if len(sys.argv) > 1 else 'localhost'
-PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 5050
+CENTRAL = sys.argv[1] if len(sys.argv) > 1 else 'localhost'
+P_CENTRAL = int(sys.argv[2]) if len(sys.argv) > 2 else 5050
 ID_ESTACION = sys.argv[3] if len(sys.argv) > 3 else None
 UBICACION = ' '.join(sys.argv[4:]) if len(sys.argv) > 4 else None
 
@@ -95,13 +92,13 @@ def main():
 
     cliente = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        cliente.connect((HOST, PORT))
+        cliente.connect((CENTRAL, P_CENTRAL))
     except (ConnectionRefusedError, socket.gaierror, OSError) as e:
-        print(f"No se pudo conectar con WM_Central en {HOST}:{PORT} -> {e}")
+        print(f"No se pudo conectar con WM_Central en {CENTRAL}:{P_CENTRAL} -> {e}")
         return
 
     try:
-        print(f"Conectado a WM_Central en {HOST}:{PORT}")
+        print(f"Conectado a WM_Central en {CENTRAL}:{P_CENTRAL}")
         trama = construir_trama("REGISTRO", id_estacion, ubicacion)
         print(f"Enviando: {trama}")
         enviar(cliente, trama)
