@@ -1,79 +1,52 @@
-"""
-WM_WS_M - Módulo monitor de la estación de riego (cliente).
-
-Uso:  py WM_WS_M.py [ip_central] [puerto] [id_estacion] [ubicacion...]
-      (por defecto localhost 5050; si no se indican ID o ubicación se piden por teclado)
-"""
-
 import socket
 import sys
 
-# ------------------------------------------------------------- PROTOCOLO
-# Cada mensaje va precedido de una CABECERA de 64 bytes con su longitud,
-# así el receptor sabe exactamente cuántos bytes tiene que leer.
-
-HEADER = 64
-FORMAT = 'utf-8'
-SEPARADOR = '#'
-
+CABECERA = 64
 
 def enviar(conn, texto):
-    datos = texto.encode(FORMAT)
-    cabecera = str(len(datos)).encode(FORMAT)
-    cabecera += b' ' * (HEADER - len(cabecera))   # rellenar hasta 64 bytes
+    datos = texto.encode('utf-8')
+    cabecera = str(len(datos)).encode('utf-8')
+    cabecera += b' ' * (CABECERA - len(cabecera))
     conn.sendall(cabecera + datos)
-
 
 def recibir_exacto(conn, n):
     datos = b''
     while len(datos) < n:
         trozo = conn.recv(n - len(datos))
-        if not trozo:          # el otro extremo ha cerrado la conexión
+        if not trozo:
             return None
         datos += trozo
     return datos
 
-
 def recibir(conn):
     """Recibe un mensaje completo. Devuelve None si la conexión se ha cerrado."""
-    cabecera = recibir_exacto(conn, HEADER)
+    cabecera = recibir_exacto(conn, CABECERA)
     if cabecera is None:
         return None
-    longitud = int(cabecera.decode(FORMAT).strip())
+    longitud = int(cabecera.strip())
     datos = recibir_exacto(conn, longitud)
     if datos is None:
         return None
-    return datos.decode(FORMAT)
-
-
-def construir_trama(*campos):
-    return SEPARADOR.join(campos)
-
-
-# ---------------------------------------------------------- CONFIGURACIÓN
+    return datos.decode('utf-8')
 
 CENTRAL = sys.argv[1] if len(sys.argv) > 1 else 'localhost'
 P_CENTRAL = int(sys.argv[2]) if len(sys.argv) > 2 else 5050
 ID_ESTACION = sys.argv[3] if len(sys.argv) > 3 else None
 UBICACION = ' '.join(sys.argv[4:]) if len(sys.argv) > 4 else None
 
-
 def pedir_campo(texto):
-    """Pide un campo por teclado asegurando que no esté vacío ni contenga '#'."""
     while True:
         valor = input(texto).strip()
         if not valor:
             print("  El campo no puede estar vacío")
-        elif SEPARADOR in valor:
-            print(f"  El campo no puede contener el carácter '{SEPARADOR}'")
         else:
             return valor
 
 
 def mostrar_respuesta(respuesta):
-    campos = respuesta.split(SEPARADOR)
+    campos = respuesta.split('#')
     if len(campos) >= 3 and campos[0] == "STATUS":
-        estado, mensaje = campos[1], SEPARADOR.join(campos[2:])
+        estado, mensaje = campos[1], campos[2]
         if estado == "OK":
             print(f">> [OK] {mensaje}")
         else:
@@ -86,22 +59,22 @@ def main():
     id_estacion = ID_ESTACION or pedir_campo("ID de la estación (ej: WS-04): ")
     ubicacion = UBICACION or pedir_campo("Ubicación (ej: River Park): ")
 
-    if SEPARADOR in id_estacion or SEPARADOR in ubicacion:
-        print(f"Los campos no pueden contener el carácter '{SEPARADOR}'")
+    if '#' in id_estacion or '#' in ubicacion:
+        print("Los campos no pueden contener el carácter '#'")
         return
 
     cliente = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         cliente.connect((CENTRAL, P_CENTRAL))
-    except (ConnectionRefusedError, socket.gaierror, OSError) as e:
+    except (OSError) as e:
         print(f"No se pudo conectar con WM_Central en {CENTRAL}:{P_CENTRAL} -> {e}")
         return
 
     try:
         print(f"Conectado a WM_Central en {CENTRAL}:{P_CENTRAL}")
-        trama = construir_trama("REGISTRO", id_estacion, ubicacion)
-        print(f"Enviando: {trama}")
-        enviar(cliente, trama)
+        msg = (f"REGISTRO#{id_estacion}#{ubicacion}")
+        print(f"Enviando: {msg}")
+        enviar(cliente, msg)
 
         respuesta = recibir(cliente)
         if respuesta is None:
@@ -111,10 +84,8 @@ def main():
             mostrar_respuesta(respuesta)
     except (ConnectionResetError, BrokenPipeError):
         print("Se perdió la conexión con WM_Central")
-    except KeyboardInterrupt:
-        print("\nCancelado")
     finally:
-        cliente.close()        # cierre limpio de la conexión
+        cliente.close()
         print("Conexión cerrada")
 
 
