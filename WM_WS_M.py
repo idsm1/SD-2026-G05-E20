@@ -1,93 +1,196 @@
+"""
+WM_WS_M - Monitor de la estación de riego.
+
+Uso:  python WM_WS_M.py <puerto_para_engine> <ip_central> <puerto_central> <ID> [ubicacion...]
+      python WM_WS_M.py 6000 localhost 5050 WS-04 River Park
+
+      (si no se indica la ubicación se pide por teclado)
+
+Qué hace:
+  1. Se conecta a WM_Central y registra la estación. Esa conexión se queda ABIERTA.
+  2. Abre un servidor en <puerto_para_engine> y espera a que se conecte su Engine.
+  3. Cuando el Engine se conecta le envía su ID:   ID#WS-04
+  4. Cada segundo le pregunta:  SALUD   -> el Engine responde OK o KO
+  5. Si responde KO, no responde en 3 s o se desconecta  -> FUGA#WS-04 a Central
+     Cuando vuelve a responder OK                         -> RECUPERADA#WS-04 a Central
+"""
+
 import socket
 import sys
+import time
 
-CABECERA = 64
+from protocolo import enviar, recibir, construir_trama, separar_trama
 
-def enviar(conn, texto):
-    datos = texto.encode('utf-8')
-    cabecera = str(len(datos)).encode('utf-8')
-    cabecera += b' ' * (CABECERA - len(cabecera))
-    conn.sendall(cabecera + datos)
+# ---------------------------------------------------------- CONFIGURACIÓN
 
-def recibir_exacto(conn, n):
-    datos = b''
-    while len(datos) < n:
-        trozo = conn.recv(n - len(datos))
-        if not trozo:
-            return None
-        datos += trozo
-    return datos
+if len(sys.argv) < 5:
+    print("Uso: python WM_WS_M.py <puerto_para_engine> <ip_central> <puerto_central> <ID> [ubicacion]")
+    sys.exit(1)
 
-def recibir(conn):
-    """Recibe un mensaje completo. Devuelve None si la conexión se ha cerrado."""
-    cabecera = recibir_exacto(conn, CABECERA)
-    if cabecera is None:
-        return None
-    longitud = int(cabecera.strip())
-    datos = recibir_exacto(conn, longitud)
-    if datos is None:
-        return None
-    return datos.decode('utf-8')
+PUERTO_ENGINE = int(sys.argv[1])
+CENTRAL = sys.argv[2]
+P_CENTRAL = int(sys.argv[3])
+ID_ESTACION = sys.argv[4]
+UBICACION = ' '.join(sys.argv[5:]) if len(sys.argv) > 5 else None
 
-CENTRAL = sys.argv[1] if len(sys.argv) > 1 else 'localhost'
-P_CENTRAL = int(sys.argv[2]) if len(sys.argv) > 2 else 5050
-ID_ESTACION = sys.argv[3] if len(sys.argv) > 3 else None
-UBICACION = ' '.join(sys.argv[4:]) if len(sys.argv) > 4 else None
+INTERVALO_SALUD = 1      # segundos entre comprobaciones
+TIMEOUT_SALUD = 3        # segundos que esperamos la respuesta del engine
+
+conn_central = None      # socket con WM_Central (se queda abierto)
+en_fuga = False          # último estado que hemos comunicado a Central
+
+
+# ------------------------------------------------------- CONEXIÓN CENTRAL
 
 def pedir_campo(texto):
     while True:
         valor = input(texto).strip()
         if not valor:
             print("  El campo no puede estar vacío")
+        elif '#' in valor:
+            print("  El campo no puede contener el carácter '#'")
         else:
             return valor
 
 
-def mostrar_respuesta(respuesta):
-    campos = respuesta.split('#')
-    if len(campos) >= 3 and campos[0] == "STATUS":
-        estado, mensaje = campos[1], campos[2]
-        if estado == "OK":
-            print(f">> [OK] {mensaje}")
-        else:
-            print(f">> [{estado}] {mensaje}")
-    else:
-        print(">> Respuesta no reconocida:", respuesta)
+def conectar_central():
+    """Se conecta a Central y registra la estación.
+    Si Central no está, reintenta cada 3 s. Si Central rechaza el registro, termina."""
+    global conn_central
+    while True:
+        try:
+            conn = socket.create_connection((CENTRAL, P_CENTRAL), timeout=5)
+            conn.settimeout(None)
+            enviar(conn, construir_trama("REGISTRO", ID_ESTACION, UBICACION))
+            respuesta = recibir(conn)
+        except OSError as e:
+            print(f"[CENTRAL] No disponible en {CENTRAL}:{P_CENTRAL} ({e}). Reintento en 3 s")
+            time.sleep(3)
+            continue
 
+        if respuesta is None:
+            print("[CENTRAL] Ha cerrado la conexión sin responder. Reintento en 3 s")
+            conn.close()
+            time.sleep(3)
+            continue
+
+        campos = separar_trama(respuesta)
+        if len(campos) >= 3 and campos[0] == "STATUS" and campos[1] == "OK":
+            print(f"[CENTRAL] Registrada como {ID_ESTACION} -> {campos[2]}")
+            conn_central = conn
+            return
+
+        # Central nos ha rechazado (ID no válido, ya conectada...): no tiene sentido reintentar
+        print(f"[CENTRAL] Registro rechazado: {respuesta}")
+        conn.close()
+        sys.exit(1)
+
+
+def avisar_central(comando):
+    """Envía FUGA o RECUPERADA a Central y lee su respuesta.
+    Si la conexión se ha caído, se reconecta y lo vuelve a enviar."""
+    mensaje = construir_trama(comando, ID_ESTACION)
+    while True:
+        try:
+            enviar(conn_central, mensaje)
+            respuesta = recibir(conn_central)
+            if respuesta is not None:
+                print(f"[CENTRAL] {mensaje} -> {respuesta}")
+                return
+        except OSError:
+            pass
+        print("[CENTRAL] Conexión perdida. Reconectando...")
+        conn_central.close()
+        conectar_central()
+
+
+# -------------------------------------------------------- VIGILAR ENGINE
+
+def actualizar_salud(sana, motivo):
+    """Avisa a Central solo cuando cambia el estado (sana <-> fuga)."""
+    global en_fuga
+    if not sana and not en_fuga:
+        en_fuga = True
+        print(f"[SALUD] *** AVERIA: {motivo} ***")
+        avisar_central("FUGA")
+    elif sana and en_fuga:
+        en_fuga = False
+        print("[SALUD] El engine vuelve a responder OK. Averia resuelta")
+        avisar_central("RECUPERADA")
+
+
+def vigilar_engine(conn, addr):
+    """Envía SALUD cada segundo al engine conectado hasta que se desconecte."""
+    print(f"[ENGINE] Conectado desde {addr[0]}:{addr[1]}")
+    try:
+        enviar(conn, construir_trama("ID", ID_ESTACION))
+        conn.settimeout(TIMEOUT_SALUD)
+        comprobaciones = 0
+
+        while True:
+            enviar(conn, "SALUD")
+            try:
+                respuesta = recibir(conn)
+            except socket.timeout:
+                actualizar_salud(False, f"el engine no responde en {TIMEOUT_SALUD} s")
+                continue
+
+            if respuesta is None:
+                break                         # el engine se ha cerrado
+            if respuesta == "OK":
+                actualizar_salud(True, "")
+            else:
+                actualizar_salud(False, "el engine ha respondido KO")
+
+            comprobaciones += 1
+            if comprobaciones % 10 == 0:      # cada 10 s, para que se vea que sigue vivo
+                print(f"[SALUD] {comprobaciones} comprobaciones. Estado: "
+                      f"{'FUGA' if en_fuga else 'OK'}")
+            time.sleep(INTERVALO_SALUD)
+    except OSError:
+        pass
+    finally:
+        conn.close()
+
+    actualizar_salud(False, "el engine se ha desconectado")
+
+
+# ------------------------------------------------------------------ MAIN
 
 def main():
-    id_estacion = ID_ESTACION or pedir_campo("ID de la estación (ej: WS-04): ")
-    ubicacion = UBICACION or pedir_campo("Ubicación (ej: River Park): ")
-
-    if '#' in id_estacion or '#' in ubicacion:
-        print("Los campos no pueden contener el carácter '#'")
+    global UBICACION
+    if '#' in ID_ESTACION:
+        print("El ID no puede contener el carácter '#'")
         return
+    if UBICACION is None:
+        UBICACION = pedir_campo("Ubicación (ej: River Park): ")
 
-    cliente = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    conectar_central()
+
+    servidor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    servidor.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    servidor.bind(("0.0.0.0", PUERTO_ENGINE))
+    servidor.listen()
+    print(f"[ENGINE] Esperando al engine de {ID_ESTACION} en el puerto {PUERTO_ENGINE}...")
+
     try:
-        cliente.connect((CENTRAL, P_CENTRAL))
-    except (OSError) as e:
-        print(f"No se pudo conectar con WM_Central en {CENTRAL}:{P_CENTRAL} -> {e}")
-        return
-
-    try:
-        print(f"Conectado a WM_Central en {CENTRAL}:{P_CENTRAL}")
-        msg = (f"REGISTRO#{id_estacion}#{ubicacion}")
-        print(f"Enviando: {msg}")
-        enviar(cliente, msg)
-
-        respuesta = recibir(cliente)
-        if respuesta is None:
-            print("WM_Central ha cerrado la conexión sin responder")
-        else:
-            print(f"Recibido: {respuesta}")
-            mostrar_respuesta(respuesta)
-    except (ConnectionResetError, BrokenPipeError):
-        print("Se perdió la conexión con WM_Central")
+        while True:
+            conn, addr = servidor.accept()     # un engine cada vez
+            vigilar_engine(conn, addr)
+            print(f"[ENGINE] Esperando a que el engine vuelva a conectarse...")
+    except KeyboardInterrupt:
+        print("\n[STOP] Monitor detenido")
     finally:
-        cliente.close()
-        print("Conexión cerrada")
+        servidor.close()
+        if conn_central:
+            conn_central.close()
 
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+    
