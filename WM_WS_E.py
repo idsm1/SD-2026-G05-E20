@@ -111,3 +111,51 @@ def riego(operario, duracion):
     with lock:
         regando = False
     print(f"Electroválvula cerrada ({motivo}) | {volumen:.1f}L en {duracion_real}s")
+
+def conectar_mon():
+    while True:
+        try:
+            conn = socket.create_connection((MONITOR, P_MONITOR), timeout=5)
+            conn.settimeout(None)
+            print(f"Conectado a {MONITOR}:{P_MONITOR}, esperando ID...")
+            trama = recibir(conn)
+            campos = trama.split("#") if trama else []
+            if len(campos) == 2 and campos[0] == "ID" and campos[1]:
+                return conn, campos[1]
+            print(f"Respuesta inesperada: {trama}")
+            conn.close()
+
+        except OSError as e:
+            print(f"No disponible en {MONITOR}:{P_MONITOR} ({e}). Reintento en 3 s")
+        time.sleep(3)
+
+def atender_mon(conn):
+    try:
+        while True:
+            trama = recibir(conn)
+            if trama is None:
+                break
+            if trama.strip().upper() == "SALUD":
+                with lock:
+                    respuesta = "OK" if salud_ok else "KO"
+                enviar(conn, respuesta)
+    except OSError:
+        pass
+    finally:
+        conn.close()
+
+def monitor(conn):
+    global monitor_conectado
+    while True:
+        with lock:
+            monitor_conectado = True
+        atender_mon(conn)
+        with lock:
+            monitor_conectado = False
+        print("Conexión perdida. Se para el riego")
+        parar_riego("SIN_MONITOR")
+
+        conn, nuevo_id = conectar_mon()
+        if nuevo_id != id_estacion:
+            print(f"AVISO: el Monitor dice ser {nuevo_id}; seguimos como {id_estacion}")
+        print("Reconectado")
