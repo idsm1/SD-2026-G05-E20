@@ -8,16 +8,16 @@ CABECERA = 64
 
 MONITOR = sys.argv[1] if len(sys.argv) > 1 else 'localhost'
 P_MONITOR = int(sys.argv[2]) if len(sys.argv) > 2 else 5050
-DOCKER = sys.argv[3] if len(sys.argv) > 3 else 'localhost'
-P_DOCKER = sys.argv[4] if len(sys.argv) > 4 else 9092
+KAFKA = sys.argv[3] if len(sys.argv) > 3 else 'localhost'
+P_KAFKA = int(sys.argv[4]) if len(sys.argv) > 4 else 9092
 
 DURACION = 60
 CAUDAL_MIN = 5.0
 CAUDAL_MAX = 10.0
 
 def enviar(conn,texto):
-    datos = texto
-    cabecera = str(len(datos))
+    datos = texto.encode('utf-8')
+    cabecera = str(len(datos)).encode('utf-8')
     cabecera += b' ' * (CABECERA - len(cabecera))
     conn.sendall(cabecera + datos)
 
@@ -159,3 +159,25 @@ def monitor(conn):
         if nuevo_id != id_estacion:
             print(f"AVISO: el Monitor dice ser {nuevo_id}; seguimos como {id_estacion}")
         print("Reconectado")
+
+def cambio_estado():
+    global salud_ok
+    with lock:
+        salud_ok = not salud_ok
+        ok = salud_ok
+    if ok:
+        print("Arreglado: Vuelve a responder OK")
+    else:
+        print("Fuga: Mandando KO al monitor")
+        parar_riego("FUGA")
+
+def sol_riego():
+    if estado_act() != "Disponible":
+        print(f"No se puede regar por: estado {estado_act()}")
+        return
+
+    operario = input("ID operario: ").strip()
+    texto = input(f"Duracion en segundos [{DURACION}]:").strip()
+    duracion = int(texto) if texto.isdigit() else DURACION
+    print("Solicitud enviada")
+    
