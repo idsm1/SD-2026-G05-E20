@@ -11,6 +11,9 @@ P_MONITOR = int(sys.argv[2]) if len(sys.argv) > 2 else 5050
 DOCKER = sys.argv[3] if len(sys.argv) > 3 else 'localhost'
 P_DOCKER = sys.argv[4] if len(sys.argv) > 4 else 9092
 
+DURACION = 60
+CAUDAL_MIN = 5.0
+CAUDAL_MAX = 10.0
 
 def enviar(conn,texto):
     datos = texto
@@ -70,7 +73,7 @@ def regar(operario,duracion):
         fin_riego.clear()
         riego_actual = threading.Thread(target=riego, args=(operario,duracion), daemon=True)
         riego_actual.start()
-    return none
+    return None
 
 def parar_riego(motivo):
     global motivo_parada
@@ -81,3 +84,30 @@ def parar_riego(motivo):
     fin_riego.set()
     return True
 
+def riego(operario, duracion):
+    global regando
+    print(f"Electroválvula abierta | operario {operario} | límite: {duracion}s")
+
+    volumen = 0.0
+    inicio = time.time()
+    motivo = "Fin de tiempo"
+
+    while True:
+        if fin_riego.wait(timeout=1):
+            with lock:
+                motivo = motivo_parada
+            break
+
+        caudal = random.uniform(CAUDAL_MIN,CAUDAL_MAX)
+        volumen = volumen + caudal/60
+        transcurrido = int (time.time() - inicio)
+
+        print(f"{caudal:5.1f}L/min | {volumen:6.1f}L | {transcurrido}/{duracion} s")
+
+        if transcurrido >= duracion:
+            break
+
+    duracion_real = int(time.time() - inicio)
+    with lock:
+        regando = False
+    print(f"Electroválvula cerrada ({motivo}) | {volumen:.1f}L en {duracion_real}s")
