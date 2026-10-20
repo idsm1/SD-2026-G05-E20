@@ -6,10 +6,7 @@ import time
 
 from protocolo import enviar, recibir, separar_trama
 
-MONITOR = sys.argv[1] if len(sys.argv) > 1 else 'localhost'
-P_MONITOR = int(sys.argv[2]) if len(sys.argv) > 2 else 5050
-KAFKA = sys.argv[3] if len(sys.argv) > 3 else 'localhost'
-P_KAFKA = int(sys.argv[4]) if len(sys.argv) > 4 else 9092
+# ---------------------------------------------------------- CONFIGURACIÓN
 
 if len(sys.argv) < 5:
     print("Uso: python WM_WS_E.py <ip_broker> <puerto_broker> <ip_monitor> <puerto_monitor>")
@@ -35,6 +32,7 @@ lock = threading.Lock()
 
 
 def estado_act():
+    """Estado actual de la estación. Llamar CON el lock cogido."""
     if not monitor_conectado:
         return "DESCONECTADA"
     if not salud_ok:
@@ -47,6 +45,7 @@ def estado_act():
 
 
 def regar(operario, duracion):
+    """Empieza un riego en un hilo aparte. Devuelve None si ha ido bien o el motivo del error."""
     global regando, riego_actual
     with lock:
         estado = estado_act()
@@ -60,6 +59,7 @@ def regar(operario, duracion):
 
 
 def parar_riego(motivo):
+    """Corta el riego en curso. Devuelve False si no se estaba regando."""
     global motivo_parada
     with lock:
         if not regando:
@@ -78,7 +78,7 @@ def riego(operario, duracion):
     motivo = "Fin de tiempo"
 
     while True:
-        if fin_riego.wait(timeout=1):
+        if fin_riego.wait(timeout=1):       # espera 1 s o hasta que nos paren
             with lock:
                 motivo = motivo_parada
             break
@@ -98,7 +98,10 @@ def riego(operario, duracion):
     print(f"[RIEGO] Electroválvula cerrada ({motivo}) | {volumen:.1f} L en {duracion_real} s")
 
 
+# ------------------------------------------------------- CONEXIÓN MONITOR
+
 def conectar_mon():
+    """Se conecta al monitor y espera a que le diga su ID. Reintenta cada 3 s."""
     while True:
         try:
             conn = socket.create_connection((MONITOR, P_MONITOR), timeout=5)
@@ -116,6 +119,7 @@ def conectar_mon():
 
 
 def atender_mon(conn):
+    """Responde a los SALUD del monitor hasta que se corte la conexión."""
     try:
         while True:
             trama = recibir(conn)
@@ -132,6 +136,7 @@ def atender_mon(conn):
 
 
 def monitor(conn):
+    """Hilo que mantiene la conexión con el monitor (y la recupera si se cae)."""
     global monitor_conectado
     while True:
         with lock:
@@ -144,27 +149,69 @@ def monitor(conn):
 
         conn, nuevo_id = conectar_mon()
         if nuevo_id != id_estacion:
-            print(f"AVISO: el Monitor dice ser {nuevo_id}; seguimos como {id_estacion}")
-        print("Reconectado")
+            print(f"[MONITOR] AVISO: el monitor dice ser {nuevo_id}; seguimos como {id_estacion}")
+        print("[MONITOR] Reconectado")
 
-def cambio_estado():
+
+# ------------------------------------------------------------------- MENÚ
+
+def cambiar_fuga():
+    """Simula una fuga (el monitor recibirá KO) o la arregla."""
     global salud_ok
     with lock:
         salud_ok = not salud_ok
-        ok = salud_ok
-    if ok:
-        print("Arreglado: Vuelve a responder OK")
+        hay_fuga = not salud_ok
+    if hay_fuga:
+        print("*** FUGA SIMULADA: el monitor recibirá KO ***")
+        if parar_riego("FUGA"):
+            print("El riego se corta inmediatamente por la fuga")
     else:
-        print("Fuga: Mandando KO al monitor")
-        parar_riego("FUGA")
+        print("Fuga arreglada: el monitor vuelve a recibir OK")
 
-def sol_riego():
-    if estado_act() != "Disponible":
-        print(f"No se puede regar por: estado {estado_act()}")
-        return
 
-    operario = input("ID operario: ").strip()
-    texto = input(f"Duracion en segundos [{DURACION}]:").strip()
-    duracion = int(texto) if texto.isdigit() else DURACION
-    print("Solicitud enviada")
-    
+def menu():
+    while True:
+        with lock:
+            estado = estado_act()
+        print(f"\n--- {id_estacion} | estado: {estado} ---")
+        print("1. Simular fuga / arreglar fuga")
+        print("2. Regar 10 s (prueba local, luego lo ordenará Central)")
+        print("3. Parar riego")
+        print("4. Salir")
+        opcion = input("> ").strip()
+
+        if opcion == "1":
+            cambiar_fuga()
+        elif opcion == "2":
+            error = regar("PRUEBA", 10)
+            if error:
+                print(f"No se puede regar: {error}")
+        elif opcion == "3":
+            if not parar_riego("PARADA MANUAL"):
+                print("No se está regando")
+        elif opcion == "4":
+            break
+        else:
+            print("Opción no válida")
+
+
+# ------------------------------------------------------------------ MAIN
+
+def main():
+    global id_estacion
+    print(f"[INFO] Broker de Kafka (siguiente fase): {BROKER}")
+    conn, id_estacion = conectar_mon()
+    print(f"[MONITOR] Soy la estación {id_estacion}")
+
+    hilo = threading.Thread(target=monitor, args=(conn,), daemon=True)
+    hilo.start()
+
+    try:
+        menu()
+    except (KeyboardInterrupt, EOFError):
+        pass
+    print("\n[STOP] Engine detenido")
+
+
+if __name__ == "__main__":
+    main()
