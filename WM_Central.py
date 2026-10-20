@@ -1,129 +1,155 @@
 """
 WM_Central - Servidor central del sistema de Water Management.
 
-Uso:  py WM_Central.py [puerto]      (por defecto 5050)
+Uso:  python WM_Central.py <puerto> [ip_broker:puerto_broker]
+      python WM_Central.py 5050 localhost:9092
 
-Trama que entiende (campos separados por '#'):
-    REGISTRO#<ID_ESTACION>#<UBICACION>
+      (el broker de Kafka todavía no se usa; se añade en la siguiente fase)
+
+Tramas que entiende (campos separados por '#'):
+    REGISTRO#<ID_ESTACION>#<UBICACION>    -> el monitor da de alta / conecta su estación
+    FUGA#<ID_ESTACION>                    -> el monitor avisa de una avería
+    RECUPERADA#<ID_ESTACION>              -> el monitor avisa de que la avería se ha resuelto
 
 Respuestas:
-    STATUS#OK#Estacion registrada correctamente
+    STATUS#OK#<mensaje>
     STATUS#ERROR#<motivo>
+
+La conexión con cada monitor se queda ABIERTA. Si se cae, la estación pasa a DESCONECTADA.
 """
 
+import os
 import re
 import socket
 import sys
 import threading
 from datetime import datetime
 
-# ------------------------------------------------------------- PROTOCOLO
-# Cada mensaje va precedido de una CABECERA de 64 bytes con su longitud,
-# así el receptor sabe exactamente cuántos bytes tiene que leer.
-
-HEADER = 64
-FORMAT = 'utf-8'
-SEPARADOR = '#'
-
-
-def enviar(conn, texto):
-    """Envía un mensaje de texto precedido de su cabecera de longitud."""
-    datos = texto.encode(FORMAT)
-    cabecera = str(len(datos)).encode(FORMAT)
-    cabecera += b' ' * (HEADER - len(cabecera))   # rellenar hasta 64 bytes
-    conn.sendall(cabecera + datos)
-
-
-def recibir_exacto(conn, n):
-    """Lee exactamente n bytes del socket (recv puede devolver menos)."""
-    datos = b''
-    while len(datos) < n:
-        trozo = conn.recv(n - len(datos))
-        if not trozo:          # el otro extremo ha cerrado la conexión
-            return None
-        datos += trozo
-    return datos
-
-
-def recibir(conn):
-    """Recibe un mensaje completo. Devuelve None si la conexión se ha cerrado."""
-    cabecera = recibir_exacto(conn, HEADER)
-    if cabecera is None:
-        return None
-    try:
-        longitud = int(cabecera.decode(FORMAT).strip())
-    except ValueError:
-        return None            # cabecera corrupta: tratamos como desconexión
-    datos = recibir_exacto(conn, longitud)
-    if datos is None:
-        return None
-    return datos.decode(FORMAT)
-
-
-def construir_trama(*campos):
-    return SEPARADOR.join(campos)
-
+from protocolo import enviar, recibir, construir_trama, separar_trama
 
 # ---------------------------------------------------------- CONFIGURACIÓN
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 5050
+BROKER = sys.argv[2] if len(sys.argv) > 2 else 'localhost:9092'   # para la fase de Kafka
 SERVER = "0.0.0.0"          # escucha en todas las interfaces de red
 ADDR = (SERVER, PORT)
 MAX_CONEXIONES = 10
 
 PATRON_ID = re.compile(r'^WS-\d+$')   # ej: WS-04
 
+# Estados posibles de una estación
+DISPONIBLE = "DISPONIBLE"
+REGANDO = "REGANDO"
+FUGA = "FUGA"
+FUERA_SERVICIO = "FUERA_SERVICIO"
+DESCONECTADA = "DESCONECTADA"
+
+# Colores para el panel (códigos ANSI)
+COLORES = {
+    DISPONIBLE: "\033[92m",       # verde
+    REGANDO: "\033[92m",          # verde
+    FUGA: "\033[91m",             # rojo
+    FUERA_SERVICIO: "\033[93m",   # naranja (amarillo en consola)
+    DESCONECTADA: "\033[90m",     # gris
+}
+RESET = "\033[0m"
+
 conexiones_activas = 0
-estaciones = {}             # ID_ESTACION -> {ubicacion, addr, hora}
-lock = threading.Lock()     # protege el contador y el registro compartidos
+estaciones = {}             # ID_ESTACION -> {ubicacion, estado, addr}
+lock = threading.Lock()     # protege el contador y el diccionario de estaciones
+
+
+# ------------------------------------------------------------------ PANEL
+
+def mostrar_panel():
+    """Muestra el estado de todas las estaciones. Llamar SIN tener el lock."""
+    with lock:
+        copia = {id_ws: dict(datos) for id_ws, datos in estaciones.items()}
+
+    hora = datetime.now().strftime("%H:%M:%S")
+    print()
+    print("=" * 56)
+    print(f"  PANEL DE CONTROL - WM_Central            {hora}")
+    print("=" * 56)
+    if not copia:
+        print("  (no hay estaciones registradas)")
+    for id_ws in sorted(copia):
+        datos = copia[id_ws]
+        color = COLORES.get(datos["estado"], "")
+        print(f"  {color}{id_ws:<8} {datos['estado']:<15}{RESET} {datos['ubicacion']}")
+    print("=" * 56)
+    print()
 
 
 # ---------------------------------------------------------------- SERVICIOS
 
 def servicio_registro(id_estacion, ubicacion, addr):
-    """Valida los datos de la estación y la guarda en el registro."""
-    id_estacion = id_estacion.strip()
-    ubicacion = ubicacion.strip()
-
+    """Valida los datos de la estación y la marca como DISPONIBLE.
+    Devuelve (respuesta, registrada_ok)."""
     if not id_estacion:
-        return construir_trama("STATUS", "ERROR", "Falta el ID de la estacion")
+        return construir_trama("STATUS", "ERROR", "Falta el ID de la estacion"), False
     if not PATRON_ID.match(id_estacion):
         return construir_trama("STATUS", "ERROR",
-                               "ID no valido. Formato esperado: WS-<numero>")
+                               "ID no valido. Formato esperado: WS-<numero>"), False
     if not ubicacion:
-        return construir_trama("STATUS", "ERROR", "Falta la ubicacion")
+        return construir_trama("STATUS", "ERROR", "Falta la ubicacion"), False
 
-    hora = datetime.now().strftime("%H:%M:%S")
     with lock:
-        ya_existia = id_estacion in estaciones
-        estaciones[id_estacion] = {"ubicacion": ubicacion,
-                                   "addr": addr, "hora": hora}
-        total = len(estaciones)
+        if id_estacion in estaciones and estaciones[id_estacion]["estado"] != DESCONECTADA:
+            return construir_trama("STATUS", "ERROR",
+                                   f"La estacion {id_estacion} ya esta conectada"), False
+        nueva = id_estacion not in estaciones
+        estaciones[id_estacion] = {"ubicacion": ubicacion, "estado": DISPONIBLE,
+                                   "addr": addr}
 
-    print("-" * 50)
-    print(f"[REGISTRO] Estacion {'actualizada' if ya_existia else 'conectada'}")
-    print(f"   ID        : {id_estacion}")
-    print(f"   Ubicacion : {ubicacion}")
-    print(f"   Direccion : {addr[0]}:{addr[1]}")
-    print(f"   Hora      : {hora}")
-    print(f"   Estaciones registradas: {total}")
-    print("-" * 50)
-
-    return construir_trama("STATUS", "OK", "Estacion registrada correctamente")
+    print(f"[REGISTRO] {id_estacion} ({ubicacion}) "
+          f"{'dada de alta' if nueva else 'reconectada'} desde {addr[0]}:{addr[1]}")
+    return construir_trama("STATUS", "OK", "Estacion registrada correctamente"), True
 
 
-def procesar(trama, addr):
-    """Parsea la trama por '#' y decide qué servicio la atiende."""
-    campos = trama.strip().split(SEPARADOR)
-    comando = campos[0].strip().upper()
+def cambiar_estado(id_estacion, nuevo_estado):
+    """Cambia el estado de una estación que ya existe."""
+    with lock:
+        if id_estacion not in estaciones:
+            return False
+        estaciones[id_estacion]["estado"] = nuevo_estado
+    return True
+
+
+def procesar(trama, addr, id_conexion):
+    """Parsea la trama y decide qué servicio la atiende.
+    id_conexion es la estación registrada en esta conexión (o None).
+    Devuelve (respuesta, id_conexion actualizado)."""
+    campos = separar_trama(trama)
+    comando = campos[0].upper()
 
     if comando == "REGISTRO":
         if len(campos) != 3:
             return construir_trama("STATUS", "ERROR",
-                                   "Formato incorrecto. Usa REGISTRO#<ID>#<UBICACION>")
-        return servicio_registro(campos[1], campos[2], addr)
-    else:
-        return construir_trama("STATUS", "ERROR", f"Comando desconocido: {comando}")
+                                   "Formato incorrecto. Usa REGISTRO#<ID>#<UBICACION>"), id_conexion
+        if id_conexion is not None:
+            return construir_trama("STATUS", "ERROR",
+                                   f"Esta conexion ya es la estacion {id_conexion}"), id_conexion
+        respuesta, ok = servicio_registro(campos[1], campos[2], addr)
+        return respuesta, (campos[1] if ok else None)
+
+    # El resto de comandos solo se aceptan después de registrarse
+    if id_conexion is None:
+        return construir_trama("STATUS", "ERROR", "Primero hay que registrarse"), id_conexion
+
+    if comando in ("FUGA", "RECUPERADA"):
+        if len(campos) != 2 or campos[1] != id_conexion:
+            return construir_trama("STATUS", "ERROR",
+                                   f"Formato incorrecto. Usa {comando}#{id_conexion}"), id_conexion
+        if comando == "FUGA":
+            cambiar_estado(id_conexion, FUGA)
+            print(f"[AVERIA] {id_conexion}: FUGA detectada por el monitor")
+        else:
+            cambiar_estado(id_conexion, DISPONIBLE)
+            print(f"[AVERIA] {id_conexion}: averia resuelta, vuelve a estar disponible")
+        return construir_trama("STATUS", "OK", f"{comando} recibido"), id_conexion
+
+    return construir_trama("STATUS", "ERROR", f"Comando desconocido: {comando}"), id_conexion
 
 
 # ------------------------------------------------------- HILO POR CLIENTE
@@ -131,39 +157,47 @@ def procesar(trama, addr):
 def atender_cliente(conn, addr):
     global conexiones_activas
     print(f"[NUEVA CONEXIÓN] {addr} conectado.")
+    id_conexion = None      # qué estación es este monitor (se sabe al registrarse)
     try:
         while True:
             trama = recibir(conn)
-            if trama is None:          # el cliente ha cerrado (close())
-                print(f"[DESCONEXIÓN] {addr} ha cerrado la conexión")
+            if trama is None:          # el monitor ha cerrado o se ha caído
                 break
 
             print(f"[{addr}] Trama recibida: {trama}")
-            respuesta = procesar(trama, addr)
+            respuesta, id_conexion = procesar(trama, addr, id_conexion)
             print(f"[{addr}] Respuesta: {respuesta}")
             enviar(conn, respuesta)
-    except (ConnectionResetError, BrokenPipeError):
-        print(f"[ERROR] Se perdió la conexión con {addr}")
+
+            if respuesta.startswith("STATUS#OK"):   # algo ha cambiado: repintamos
+                mostrar_panel()
+    except (ConnectionResetError, BrokenPipeError, OSError):
+        pass
     finally:
         conn.close()
+        print(f"[DESCONEXIÓN] {addr} ({id_conexion or 'sin registrar'})")
+        if id_conexion is not None:
+            cambiar_estado(id_conexion, DESCONECTADA)
+            mostrar_panel()
         with lock:
             conexiones_activas -= 1
-            print(f"[CONEXIONES ACTIVAS] {conexiones_activas}/{MAX_CONEXIONES}")
 
 
 # ------------------------------------------------------------------ MAIN
 
 def start():
     global conexiones_activas
+    os.system("")   # en Windows activa los colores ANSI en la consola
+
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(ADDR)
     server.listen()
 
-    ip_local = socket.gethostbyname(socket.gethostname())
     print("[STARTING] WM_Central inicializándose...")
-    print(f"[LISTENING] Escuchando en el puerto {PORT} (IP de esta máquina: {ip_local})")
-    print(f"[INFO] Máximo de estaciones simultáneas: {MAX_CONEXIONES}")
+    print(f"[LISTENING] Escuchando en el puerto {PORT}")
+    print(f"[INFO] Broker de Kafka (siguiente fase): {BROKER}")
+    mostrar_panel()
 
     try:
         while True:
@@ -177,7 +211,6 @@ def start():
                 hilo = threading.Thread(target=atender_cliente,
                                         args=(conn, addr), daemon=True)
                 hilo.start()
-                print(f"[CONEXIONES ACTIVAS] {conexiones_activas}/{MAX_CONEXIONES}")
             else:
                 print(f"[RECHAZADO] {addr}: demasiadas conexiones")
                 enviar(conn, construir_trama("STATUS", "ERROR",
