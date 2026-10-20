@@ -1,18 +1,3 @@
-"""
-WM_WS_E - Engine de la estación de riego.
-
-Uso:  python WM_WS_E.py <ip_broker> <puerto_broker> <ip_monitor> <puerto_monitor>
-      python WM_WS_E.py localhost 9092 localhost 6000
-
-      (el broker de Kafka todavía no se usa; se añade en la siguiente fase)
-
-Qué hace:
-  1. Se conecta a su monitor. El monitor le envía su ID:  ID#WS-04
-  2. Responde a cada SALUD del monitor con OK, o con KO si hay una fuga simulada.
-  3. Menú por teclado para simular/arreglar una fuga y para probar el riego.
-  4. Si el monitor se cae, para el riego y se reintenta conectar cada 3 s.
-"""
-
 import random
 import socket
 import sys
@@ -50,7 +35,6 @@ lock = threading.Lock()
 
 
 def estado_act():
-    """Estado actual de la estación. Llamar CON el lock cogido."""
     if not monitor_conectado:
         return "DESCONECTADA"
     if not salud_ok:
@@ -62,10 +46,7 @@ def estado_act():
     return "DISPONIBLE"
 
 
-# ------------------------------------------------------------------ RIEGO
-
 def regar(operario, duracion):
-    """Empieza un riego en un hilo aparte. Devuelve None si ha ido bien o el motivo del error."""
     global regando, riego_actual
     with lock:
         estado = estado_act()
@@ -79,7 +60,6 @@ def regar(operario, duracion):
 
 
 def parar_riego(motivo):
-    """Corta el riego en curso. Devuelve False si no se estaba regando."""
     global motivo_parada
     with lock:
         if not regando:
@@ -98,7 +78,7 @@ def riego(operario, duracion):
     motivo = "Fin de tiempo"
 
     while True:
-        if fin_riego.wait(timeout=1):       # espera 1 s o hasta que nos paren
+        if fin_riego.wait(timeout=1):
             with lock:
                 motivo = motivo_parada
             break
@@ -118,10 +98,7 @@ def riego(operario, duracion):
     print(f"[RIEGO] Electroválvula cerrada ({motivo}) | {volumen:.1f} L en {duracion_real} s")
 
 
-# ------------------------------------------------------- CONEXIÓN MONITOR
-
 def conectar_mon():
-    """Se conecta al monitor y espera a que le diga su ID. Reintenta cada 3 s."""
     while True:
         try:
             conn = socket.create_connection((MONITOR, P_MONITOR), timeout=5)
@@ -139,7 +116,6 @@ def conectar_mon():
 
 
 def atender_mon(conn):
-    """Responde a los SALUD del monitor hasta que se corte la conexión."""
     try:
         while True:
             trama = recibir(conn)
@@ -156,7 +132,6 @@ def atender_mon(conn):
 
 
 def monitor(conn):
-    """Hilo que mantiene la conexión con el monitor (y la recupera si se cae)."""
     global monitor_conectado
     while True:
         with lock:
