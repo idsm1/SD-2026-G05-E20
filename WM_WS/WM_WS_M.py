@@ -13,10 +13,13 @@ Qué hace:
   4. Cada segundo le pregunta:  SALUD   -> el Engine responde OK o KO
   5. Si responde KO, no responde en 3 s o se desconecta  -> FUGA#WS-04 a Central
      Cuando vuelve a responder OK                         -> RECUPERADA#WS-04 a Central
+  6. Cada 5 s envía PING#WS-04 a Central (latido). Si Central se ha caído o reiniciado,
+     así nos enteramos enseguida, nos volvemos a registrar y le recordamos si hay fuga.
 """
 
 import socket
 import sys
+import threading
 import time
 
 from protocolo import enviar, recibir, construir_trama, separar_trama
@@ -35,9 +38,11 @@ UBICACION = ' '.join(sys.argv[5:]) if len(sys.argv) > 5 else None
 
 INTERVALO_SALUD = 1      # segundos entre comprobaciones
 TIMEOUT_SALUD = 3        # segundos que esperamos la respuesta del engine
+INTERVALO_LATIDO = 5     # segundos entre PING a Central
 
 conn_central = None      # socket con WM_Central (se queda abierto)
 en_fuga = False          # último estado que hemos comunicado a Central
+lock_central = threading.RLock()   # el socket de Central lo usan dos hilos (salud y latido)
 
 
 # ------------------------------------------------------- CONEXIÓN CENTRAL
@@ -87,21 +92,33 @@ def conectar_central():
 
 
 def avisar_central(comando):
-    """Envía FUGA o RECUPERADA a Central y lee su respuesta.
+    """Envía FUGA, RECUPERADA o PING a Central y lee su respuesta.
     Si la conexión se ha caído, se reconecta y lo vuelve a enviar."""
     mensaje = construir_trama(comando, ID_ESTACION)
+    with lock_central:              # mensaje y respuesta tienen que ir juntos
+        while True:
+            try:
+                enviar(conn_central, mensaje)
+                respuesta = recibir(conn_central)
+                if respuesta is not None:
+                    if comando != "PING":
+                        print(f"[CENTRAL] {mensaje} -> {respuesta}")
+                    return
+            except OSError:
+                pass
+            print("[CENTRAL] Conexión perdida. Reconectando...")
+            conn_central.close()
+            conectar_central()
+            # Central nos acaba de registrar como DISPONIBLE: si teníamos fuga, se lo recordamos
+            if en_fuga and comando != "FUGA":
+                avisar_central("FUGA")
+
+
+def latido_central():
+    """Hilo que envía PING a Central cada 5 s para detectar si se ha caído."""
     while True:
-        try:
-            enviar(conn_central, mensaje)
-            respuesta = recibir(conn_central)
-            if respuesta is not None:
-                print(f"[CENTRAL] {mensaje} -> {respuesta}")
-                return
-        except OSError:
-            pass
-        print("[CENTRAL] Conexión perdida. Reconectando...")
-        conn_central.close()
-        conectar_central()
+        time.sleep(INTERVALO_LATIDO)
+        avisar_central("PING")
 
 
 # -------------------------------------------------------- VIGILAR ENGINE
@@ -166,6 +183,7 @@ def main():
         UBICACION = pedir_campo("Ubicación (ej: River Park): ")
 
     conectar_central()
+    threading.Thread(target=latido_central, daemon=True).start()
 
     servidor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     servidor.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -188,9 +206,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-    

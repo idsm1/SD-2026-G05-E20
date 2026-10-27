@@ -1,0 +1,17 @@
+# Entorno virtual de Python
+.venv/
+
+# Caché de Python
+__pycache__/
+*.pyc
+
+# Base de datos local (se crea sola al arrancar WM_Central)
+*.db
+
+# Variables de entorno y secretos
+.env
+
+# Sistema y editor
+Thumbs.db
+.DS_Store
+.vscode/

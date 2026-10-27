@@ -10,12 +10,15 @@ Tramas que entiende (campos separados por '#'):
     REGISTRO#<ID_ESTACION>#<UBICACION>    -> el monitor da de alta / conecta su estación
     FUGA#<ID_ESTACION>                    -> el monitor avisa de una avería
     RECUPERADA#<ID_ESTACION>              -> el monitor avisa de que la avería se ha resuelto
+    PING#<ID_ESTACION>                    -> latido del monitor cada 5 s (para saber que seguimos vivos)
 
 Respuestas:
     STATUS#OK#<mensaje>
     STATUS#ERROR#<motivo>
 
 La conexión con cada monitor se queda ABIERTA. Si se cae, la estación pasa a DESCONECTADA.
+Las estaciones y los operarios se guardan en SQLite (bd.py). Al arrancar, las estaciones
+de la base de datos aparecen como DESCONECTADA hasta que su monitor vuelva a conectar.
 """
 
 import os
@@ -25,6 +28,7 @@ import sys
 import threading
 from datetime import datetime
 
+import bd
 from protocolo import enviar, recibir, construir_trama, separar_trama
 
 # ---------------------------------------------------------- CONFIGURACIÓN
@@ -55,7 +59,7 @@ COLORES = {
 RESET = "\033[0m"
 
 conexiones_activas = 0
-estaciones = {}             # ID_ESTACION -> {ubicacion, estado, addr}
+estaciones = {}             # ID_ESTACION -> {ubicacion, estado, bloqueada, addr}
 lock = threading.Lock()     # protege el contador y el diccionario de estaciones
 
 
@@ -99,19 +103,25 @@ def servicio_registro(id_estacion, ubicacion, addr):
             return construir_trama("STATUS", "ERROR",
                                    f"La estacion {id_estacion} ya esta conectada"), False
         nueva = id_estacion not in estaciones
-        estaciones[id_estacion] = {"ubicacion": ubicacion, "estado": DISPONIBLE,
+        bloqueada = estaciones[id_estacion]["bloqueada"] if not nueva else False
+        estaciones[id_estacion] = {"ubicacion": ubicacion, "bloqueada": bloqueada,
+                                   "estado": FUERA_SERVICIO if bloqueada else DISPONIBLE,
                                    "addr": addr}
 
+    bd.guardar_estacion(id_estacion, ubicacion)   # alta nueva o actualizar ubicación
     print(f"[REGISTRO] {id_estacion} ({ubicacion}) "
           f"{'dada de alta' if nueva else 'reconectada'} desde {addr[0]}:{addr[1]}")
     return construir_trama("STATUS", "OK", "Estacion registrada correctamente"), True
 
 
 def cambiar_estado(id_estacion, nuevo_estado):
-    """Cambia el estado de una estación que ya existe."""
+    """Cambia el estado de una estación que ya existe.
+    Si se pide DISPONIBLE pero la estación está bloqueada, queda FUERA_SERVICIO."""
     with lock:
         if id_estacion not in estaciones:
             return False
+        if nuevo_estado == DISPONIBLE and estaciones[id_estacion]["bloqueada"]:
+            nuevo_estado = FUERA_SERVICIO
         estaciones[id_estacion]["estado"] = nuevo_estado
     return True
 
@@ -136,6 +146,9 @@ def procesar(trama, addr, id_conexion):
     # El resto de comandos solo se aceptan después de registrarse
     if id_conexion is None:
         return construir_trama("STATUS", "ERROR", "Primero hay que registrarse"), id_conexion
+
+    if comando == "PING":
+        return construir_trama("STATUS", "OK", "PONG"), id_conexion
 
     if comando in ("FUGA", "RECUPERADA"):
         if len(campos) != 2 or campos[1] != id_conexion:
@@ -164,12 +177,15 @@ def atender_cliente(conn, addr):
             if trama is None:          # el monitor ha cerrado o se ha caído
                 break
 
-            print(f"[{addr}] Trama recibida: {trama}")
+            es_ping = trama.upper().startswith("PING")
+            if not es_ping:                    # el latido no se muestra, sería cada 5 s
+                print(f"[{addr}] Trama recibida: {trama}")
             respuesta, id_conexion = procesar(trama, addr, id_conexion)
-            print(f"[{addr}] Respuesta: {respuesta}")
+            if not es_ping:
+                print(f"[{addr}] Respuesta: {respuesta}")
             enviar(conn, respuesta)
 
-            if respuesta.startswith("STATUS#OK"):   # algo ha cambiado: repintamos
+            if respuesta.startswith("STATUS#OK") and not es_ping:   # algo ha cambiado
                 mostrar_panel()
     except (ConnectionResetError, BrokenPipeError, OSError):
         pass
@@ -189,6 +205,12 @@ def start():
     global conexiones_activas
     os.system("")   # en Windows activa los colores ANSI en la consola
 
+    # Base de datos: crear tablas si hace falta y cargar las estaciones conocidas
+    bd.crear_tablas()
+    for id_ws, ubicacion, bloqueada in bd.cargar_estaciones():
+        estaciones[id_ws] = {"ubicacion": ubicacion, "bloqueada": bloqueada,
+                             "estado": DESCONECTADA, "addr": None}
+
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(ADDR)
@@ -197,6 +219,8 @@ def start():
     print("[STARTING] WM_Central inicializándose...")
     print(f"[LISTENING] Escuchando en el puerto {PORT}")
     print(f"[INFO] Broker de Kafka (siguiente fase): {BROKER}")
+    print(f"[BD] {bd.RUTA_BD}: {len(estaciones)} estaciones, "
+          f"operarios: {', '.join(bd.cargar_operarios())}")
     mostrar_panel()
 
     try:
