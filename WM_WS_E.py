@@ -6,7 +6,6 @@ import time
 
 from protocolo import enviar, recibir, separar_trama
 
-# ---------------------------------------------------------- CONFIGURACIÓN
 
 if len(sys.argv) < 5:
     print("Uso: python WM_WS_E.py <ip_broker> <puerto_broker> <ip_monitor> <puerto_monitor>")
@@ -29,6 +28,7 @@ motivo_parada = None
 fin_riego = threading.Event() # se activa para cortar el riego antes de tiempo
 riego_actual = None
 lock = threading.Lock()
+productor = None
 
 
 def estado_act():
@@ -98,8 +98,6 @@ def riego(operario, duracion):
     print(f"[RIEGO] Electroválvula cerrada ({motivo}) | {volumen:.1f} L en {duracion_real} s")
 
 
-# ------------------------------------------------------- CONEXIÓN MONITOR
-
 def conectar_mon():
     """Se conecta al monitor y espera a que le diga su ID. Reintenta cada 3 s."""
     while True:
@@ -153,8 +151,6 @@ def monitor(conn):
         print("[MONITOR] Reconectado")
 
 
-# ------------------------------------------------------------------- MENÚ
-
 def cambiar_fuga():
     """Simula una fuga (el monitor recibirá KO) o la arregla."""
     global salud_ok
@@ -194,8 +190,16 @@ def menu():
         else:
             print("Opción no válida")
 
+def publicar(*campos):
+    if productor is None:
+        return
+    mensaje = "#".join(str(c) for c in campos)
 
-# ------------------------------------------------------------------ MAIN
+    try:
+        productor.send("eventos_ws", mensaje.encode('utf-8'))
+    except Exception as e:
+        print(f"No se pudo publicar '{mensaje}': {e}")
+ 
 
 def main():
     global id_estacion
