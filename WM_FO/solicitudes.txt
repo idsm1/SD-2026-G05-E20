@@ -1,0 +1,5 @@
+# Solicitudes de riego para el modo fichero de WM_FO
+# Formato: <ID_ESTACION>;<duracion_en_segundos>
+WS-01;10
+WS-02;8
+WS-01;5
