@@ -54,8 +54,6 @@ riego_id_actual = None        # id del riego en curso (para ignorar órdenes rep
 motivo_parada = None
 fin_riego = threading.Event() # se activa para cortar el riego antes de tiempo
 lock = threading.Lock()
-productor = None
-
 productor = None              # productor de Kafka
 kafka_listo = threading.Event()        # se activa cuando ya escuchamos las órdenes
 solicitud_pendiente = None    # id de la petición de riego hecha desde el menú
@@ -351,16 +349,6 @@ def menu():
             break
         else:
             print("Opción no válida")
-
-def publicar(*campos):
-    if productor is None:
-        return
-    mensaje = "#".join(str(c) for c in campos)
-
-    try:
-        productor.send("eventos_ws", mensaje.encode('utf-8'))
-    except Exception as e:
-        print(f"No se pudo publicar '{mensaje}': {e}")
  
 
 def main():
