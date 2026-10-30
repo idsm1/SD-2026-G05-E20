@@ -32,7 +32,6 @@ from config import (TOPIC_SOLICITUDES, TOPIC_ORDENES, TOPIC_TELEMETRIA, TOPIC_EV
                     crear_topics, crear_productor, crear_consumidor)
 from protocolo import enviar, recibir, separar_trama
 
-# ---------------------------------------------------------- CONFIGURACIÓN
 
 if len(sys.argv) < 5:
     print("Uso: python WM_WS_E.py <ip_broker> <puerto_broker> <ip_monitor> <puerto_monitor>")
@@ -46,8 +45,6 @@ CAUDAL_MIN = 5.0       # L/min
 CAUDAL_MAX = 10.0
 ESPERA_CENTRAL = 10    # s que esperamos la respuesta de Central a una petición de riego
 
-# ------------------------------------------------------- ESTADO DEL ENGINE
-
 id_estacion = None
 salud_ok = True               # False = fuga simulada (se responde KO al monitor)
 bloqueada = False             # Central nos ha puesto "Fuera de servicio"
@@ -57,6 +54,7 @@ riego_id_actual = None        # id del riego en curso (para ignorar órdenes rep
 motivo_parada = None
 fin_riego = threading.Event() # se activa para cortar el riego antes de tiempo
 lock = threading.Lock()
+productor = None
 
 productor = None              # productor de Kafka
 kafka_listo = threading.Event()        # se activa cuando ya escuchamos las órdenes
@@ -264,8 +262,6 @@ def pedir_riego():
     solicitud_pendiente = None
 
 
-# ------------------------------------------------------- CONEXIÓN MONITOR
-
 def conectar_mon():
     """Se conecta al monitor y espera a que le diga su ID. Reintenta cada 3 s."""
     while True:
@@ -319,8 +315,6 @@ def monitor(conn):
         print("[MONITOR] Reconectado")
 
 
-# ------------------------------------------------------------------- MENÚ
-
 def cambiar_fuga():
     """Simula una fuga (el monitor recibirá KO) o la arregla."""
     global salud_ok
@@ -358,8 +352,16 @@ def menu():
         else:
             print("Opción no válida")
 
+def publicar(*campos):
+    if productor is None:
+        return
+    mensaje = "#".join(str(c) for c in campos)
 
-# ------------------------------------------------------------------ MAIN
+    try:
+        productor.send("eventos_ws", mensaje.encode('utf-8'))
+    except Exception as e:
+        print(f"No se pudo publicar '{mensaje}': {e}")
+ 
 
 def main():
     global id_estacion
