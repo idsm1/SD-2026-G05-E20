@@ -180,6 +180,10 @@ def servicio_registro(id_estacion, ubicacion, addr):
     bd.guardar_estacion(id_estacion, ubicacion)   # alta nueva o actualizar ubicación
     print(f"[REGISTRO] {id_estacion} ({ubicacion}) "
           f"{'dada de alta' if nueva else 'reconectada'} desde {addr[0]}:{addr[1]}")
+
+    if bloqueada:
+        publicar(TOPIC_ORDENES, id_estacion, {"tipo": "BLOQUEAR", "ws": id_estacion})
+
     return construir_trama("STATUS", "OK", "Estacion registrada correctamente"), True
 
 
@@ -412,6 +416,106 @@ def procesar_evento(evento):
                   riego_id=evento["riego_id"])
         mostrar_panel()
 
+# --------------------------------------------- MENÚ: PARAR / REANUDAR ESTACIONES
+
+def elegir_estaciones(texto):
+    """Convierte lo que escribe el usuario en (lista de IDs, destino de la orden).
+    'todas' o '*' -> todas las estaciones conocidas, y la orden va a '*'.
+    Devuelve (None, None) si la estación no existe."""
+    texto = texto.strip().upper()
+    with lock:
+        if texto in ("*", "TODAS"):
+            return sorted(estaciones), "*"
+        if texto in estaciones:
+            return [texto], texto
+    return None, None
+
+
+def bloquear_estaciones(texto):
+    """Parar: la estación (o todas) pasa a Fuera de Servicio y no acepta riegos.
+    Si estaba regando, el engine corta el riego y nos manda el FIN_RIEGO."""
+    ids, destino = elegir_estaciones(texto)
+    if ids is None:
+        print(f"[MENU] La estacion {texto.strip().upper()} no existe")
+        return
+    regando = []
+    with lock:
+        for id_ws in ids:
+            datos = estaciones[id_ws]
+            datos["bloqueada"] = True
+            if datos["estado"] in (DISPONIBLE, REGANDO):
+                datos["estado"] = FUERA_SERVICIO
+            # (si está en FUGA o DESCONECTADA se queda así; al volver pasará a Fuera de Servicio)
+            if datos["riego"] is not None:
+                regando.append((id_ws, datos["riego"]))
+    for id_ws in ids:
+        bd.guardar_bloqueo(id_ws, True)
+    for id_ws, riego in regando:
+        notificar(riego["fo"], "AVISO", id_ws,
+                  f"{id_ws} ha sido puesta fuera de servicio por Central: el riego se corta",
+                  riego_id=riego["id"])
+    publicar(TOPIC_ORDENES, destino, {"tipo": "BLOQUEAR", "ws": destino})
+    print(f"[MENU] Fuera de servicio: {', '.join(ids) if ids else '(ninguna)'}")
+    mostrar_panel()
+
+
+def activar_estaciones(texto):
+    """Reanudar: la estación (o todas) vuelve a estar disponible."""
+    ids, destino = elegir_estaciones(texto)
+    if ids is None:
+        print(f"[MENU] La estacion {texto.strip().upper()} no existe")
+        return
+    with lock:
+        for id_ws in ids:
+            datos = estaciones[id_ws]
+            datos["bloqueada"] = False
+            if datos["estado"] == FUERA_SERVICIO:
+                datos["estado"] = DISPONIBLE
+    for id_ws in ids:
+        bd.guardar_bloqueo(id_ws, False)
+    publicar(TOPIC_ORDENES, destino, {"tipo": "ACTIVAR", "ws": destino})
+    print(f"[MENU] Reactivadas: {', '.join(ids) if ids else '(ninguna)'}")
+    mostrar_panel()
+
+
+def cortar_riego(texto):
+    """Corta el riego en curso de una estación, que queda disponible para otro riego."""
+    id_ws = texto.strip().upper()
+    with lock:
+        riego = estaciones[id_ws]["riego"] if id_ws in estaciones else None
+    if riego is None:
+        print(f"[MENU] {id_ws} no esta regando")
+        return
+    notificar(riego["fo"], "AVISO", id_ws, f"Central ha cortado el riego en {id_ws}",
+              riego_id=riego["id"])
+    publicar(TOPIC_ORDENES, id_ws, {"tipo": "STOP", "ws": id_ws, "riego_id": riego["id"]})
+    print(f"[MENU] Orden STOP enviada a {id_ws} (el resumen llegará al terminar)")
+
+
+def menu_central():
+    """Hilo con el menú de Central. Si no hay teclado (p. ej. en Docker sin -it), se cierra."""
+    time.sleep(1)       # que salgan antes los mensajes de arranque
+    while True:
+        print("\n--- MENU WM_Central ---")
+        print("1. Parar estacion (Fuera de Servicio)   [ID o 'todas']")
+        print("2. Reanudar estacion                     [ID o 'todas']")
+        print("3. Cortar el riego en curso de una estacion")
+        print("4. Ver panel")
+        try:
+            opcion = input("> ").strip()
+            if opcion == "1":
+                bloquear_estaciones(input("Estacion (ej: WS-01, o 'todas'): "))
+            elif opcion == "2":
+                activar_estaciones(input("Estacion (ej: WS-01, o 'todas'): "))
+            elif opcion == "3":
+                cortar_riego(input("Estacion (ej: WS-01): "))
+            elif opcion == "4":
+                mostrar_panel()
+            elif opcion:
+                print("Opcion no valida")
+        except EOFError:
+            print("[MENU] Sin entrada por teclado: el menu de Central queda desactivado")
+            return
 
 # ------------------------------------------------------ KAFKA: HILO LECTOR
 
@@ -479,6 +583,7 @@ def start():
 
     threading.Thread(target=escuchar_kafka, daemon=True).start()
     threading.Thread(target=refrescar_panel, daemon=True).start()
+    threading.Thread(target=menu_central, daemon=True).start()
 
     try:
         while True:
