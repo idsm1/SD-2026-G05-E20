@@ -39,12 +39,15 @@ FICHERO = sys.argv[4] if len(sys.argv) > 4 else None
 ESPERA_RESPUESTA = 10    # s que esperamos a que Central autorice o deniegue
 ESPERA_ENTRE_FICHERO = 4  # s entre una solicitud del fichero y la siguiente
 MARGEN_FIN = 30         # s de más que esperamos el resumen después de la duración del riego
+SILENCIO_CENTRAL = 10   # s sin recibir el estado de la red (Central lo envía cada 3 s) -> Central caída
 
 # ---------------------------------------------------------------- ESTADO
 
 productor = None
 kafka_listo = threading.Event()   # se activa cuando ya escuchamos las notificaciones
 estado_red = []                   # última lista de estaciones recibida de Central
+ultimo_estado_red = time.time()   # cuándo llegó el último estado de la red
+central_viva = True               # False mientras pensamos que Central está caída
 lock = threading.Lock()
 
 # Solicitudes que estamos esperando:  id -> {"respuesta": Event, "fin": Event, "autorizado": bool}
@@ -87,7 +90,7 @@ def mostrar_notificacion(n):
 
 def escuchar_kafka(consumidor):
     """Hilo que lee las notificaciones de este operario y el estado de la red."""
-    global estado_red
+    global estado_red, ultimo_estado_red, central_viva
     while True:
         lotes = consumidor.poll(timeout_ms=1000, max_records=1)
         if not kafka_listo.is_set() and consumidor.assignment():
@@ -98,6 +101,11 @@ def escuchar_kafka(consumidor):
                     if msg.topic == TOPIC_ESTADO_RED:
                         with lock:
                             estado_red = msg.value["estaciones"]
+                            ultimo_estado_red = time.time()
+                            volvio = not central_viva
+                            central_viva = True
+                        if volvio:
+                            print("\n[CENTRAL] Conexión con WM_Central restablecida")
                     elif msg.value.get("fo") == ID_FO:      # solo las de este operario
                         mostrar_notificacion(msg.value)
                 except (KeyError, ValueError, TypeError) as e:
@@ -105,6 +113,20 @@ def escuchar_kafka(consumidor):
         if lotes:
             consumidor.commit()
 
+
+def vigilar_central():
+    """Hilo: Central publica el estado de la red cada 3 s. Si dejan de llegar,
+    avisamos al operario de que Central no está disponible (una sola vez)."""
+    global central_viva
+    while True:
+        time.sleep(1)
+        with lock:
+            caida = central_viva and time.time() - ultimo_estado_red > SILENCIO_CENTRAL
+            if caida:
+                central_viva = False
+        if caida:
+            print(f"\n*** Imposible conectar con WM_Central (sin noticias desde hace "
+                  f"{SILENCIO_CENTRAL} s) ***")
 
 def conectar_kafka():
     """Se conecta al broker. Si no está, reintenta cada 5 s."""
@@ -144,7 +166,6 @@ def solicitar_riego(ws, duracion):
     print(f"Solicitud enviada: regar en {ws} durante {duracion} s. Esperando a Central...")
     if not espera["respuesta"].wait(timeout=ESPERA_RESPUESTA):
         print("*** Imposible conectar con WM_Central ***")
-        print("    (la solicitud queda en Kafka: si Central vuelve en menos de 30 s, la atenderá)")
         return None
     return espera
 
@@ -242,6 +263,7 @@ def main():
     print(f"[KAFKA] Conectando con el broker {BROKER}...")
     consumidor = conectar_kafka()
     threading.Thread(target=escuchar_kafka, args=(consumidor,), daemon=True).start()
+    threading.Thread(target=vigilar_central, daemon=True).start()
 
     try:
         # Esperamos a estar escuchando antes de pedir nada (si no, nos perderíamos la respuesta)

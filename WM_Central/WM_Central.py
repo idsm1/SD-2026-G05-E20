@@ -29,6 +29,7 @@ import socket
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime
 
 import bd
@@ -47,7 +48,9 @@ ADDR = (SERVER, PORT)
 MAX_CONEXIONES = 10
 
 PATRON_ID = re.compile(r'^WS-\d+$')   # ej: WS-04
-CADUCIDAD_SOLICITUD = 30    # s: una solicitud más vieja se deniega (el FO ya se ha cansado de esperar)
+CADUCIDAD_SOLICITUD = 10    # s: una solicitud más vieja se deniega (el FO y la WS esperan 10 s y
+                            # luego dicen "Imposible conectar": no se puede atender después)
+TIMEOUT_MONITOR = 15        # s sin recibir nada de un monitor -> DESCONECTADA
 REFRESCO_PANEL = 3          # s entre repintados del panel mientras alguna estación riega
 
 # Colores de FONDO para el panel (códigos ANSI). 30 = letra negra, 5 = parpadeo
@@ -108,25 +111,28 @@ def mostrar_panel():
 
     hora = datetime.now().strftime("%H:%M:%S")
     print()
-    print("=" * 78)
-    print(f"  PANEL DE CONTROL - WM_Central                                     {hora}")
-    print("=" * 78)
-    print(f"  {'ID':<7} {'ESTADO':<17} {'UBICACION':<18} {'CAUDAL':>11} {'VOLUMEN':>9}  OPERARIO")
-    print("-" * 78)
+    agua = bd.agua_por_estacion()      # litros ya regados por cada estación (riegos terminados)
+    print("=" * 90)
+    print(f"  PANEL DE CONTROL - WM_Central                                                 {hora}")
+    print("=" * 90)
+    print(f"  {'ID':<7} {'ESTADO':<17} {'UBICACION':<18} {'AGUA TOTAL':>10} {'CAUDAL':>11} {'VOLUMEN':>9}  OPERARIO")
+    print("-" * 90)
     if not copia:
         print("  (no hay estaciones registradas)")
     for id_ws in sorted(copia):
         datos = copia[id_ws]
         estado = datos["estado"]
-        texto_estado = "Fuera de Servicio" if estado == FUERA_SERVICIO else estado
+        texto_estado = "Out of Service" if estado == FUERA_SERVICIO else estado
         color = COLORES.get(estado, "")
-        linea = f"  {color} {id_ws:<6} {texto_estado:<17}{RESET} {datos['ubicacion'][:18]:<18}"
         riego = datos["riego"]
+        total = agua.get(id_ws, 0.0) + (riego.get("volumen", 0.0) if riego else 0.0)
+        linea = (f"  {color} {id_ws:<6} {texto_estado:<17}{RESET} {datos['ubicacion'][:18]:<18}"
+                 f" {total:8.1f} L")
         if estado == REGANDO and riego is not None:
             linea += (f" {riego['caudal']:5.1f} L/min {riego['volumen']:7.1f} L  {riego['fo']}"
                       f"  ({riego['segundos']}/{riego['duracion']} s)")
         print(linea)
-    print("=" * 78)
+    print("=" * 90)
     print()
 
     publicar_estado_red(copia)
@@ -253,6 +259,7 @@ def atender_cliente(conn, addr):
     global conexiones_activas
     print(f"[NUEVA CONEXIÓN] {addr} conectado.")
     id_conexion = None      # qué estación es este monitor (se sabe al registrarse)
+    conn.settimeout(TIMEOUT_MONITOR)
     try:
         while True:
             trama = recibir(conn)
@@ -269,6 +276,8 @@ def atender_cliente(conn, addr):
 
             if respuesta.startswith("STATUS#OK") and not es_ping:   # algo ha cambiado
                 mostrar_panel()
+    except socket.timeout:
+        print(f"[TIMEOUT] {addr}: {TIMEOUT_MONITOR} s sin recibir nada del monitor")
     except (ConnectionResetError, BrokenPipeError, OSError):
         pass
     finally:
@@ -492,24 +501,63 @@ def cortar_riego(texto):
     print(f"[MENU] Orden STOP enviada a {id_ws} (el resumen llegará al terminar)")
 
 
+def iniciar_riego_central(texto, texto_duracion):
+    """Central ordena un riego en una estación (o en todas las que estén disponibles).
+    El operario que aparece es CENTRAL."""
+    try:
+        duracion = int(texto_duracion)
+    except ValueError:
+        print("[MENU] La duracion tiene que ser un numero")
+        return
+    if duracion <= 0:
+        print("[MENU] La duracion tiene que ser mayor que 0")
+        return
+    ids, destino = elegir_estaciones(texto)
+    if ids is None:
+        print(f"[MENU] La estacion {texto.strip().upper()} no existe")
+        return
+
+    ordenes = []
+    with lock:
+        for id_ws in ids:
+            if estaciones[id_ws]["estado"] != DISPONIBLE:
+                print(f"[MENU] {id_ws} no esta disponible ({estaciones[id_ws]['estado']})")
+                continue
+            riego_id = str(uuid.uuid4())[:8]
+            estaciones[id_ws]["estado"] = REGANDO
+            estaciones[id_ws]["riego"] = {"id": riego_id, "fo": "CENTRAL", "duracion": duracion,
+                                          "caudal": 0.0, "volumen": 0.0, "segundos": 0}
+            ordenes.append((id_ws, riego_id))
+    for id_ws, riego_id in ordenes:
+        publicar(TOPIC_ORDENES, id_ws, {"tipo": "START", "ws": id_ws, "riego_id": riego_id,
+                                        "fo": "CENTRAL", "duracion": duracion})
+        print(f"[MENU] Riego iniciado en {id_ws} durante {duracion} s")
+    if ordenes:
+        mostrar_panel()
+
+
 def menu_central():
     """Hilo con el menú de Central. Si no hay teclado (p. ej. en Docker sin -it), se cierra."""
     time.sleep(1)       # que salgan antes los mensajes de arranque
     while True:
         print("\n--- MENU WM_Central ---")
-        print("1. Parar estacion (Fuera de Servicio)   [ID o 'todas']")
-        print("2. Reanudar estacion                     [ID o 'todas']")
-        print("3. Cortar el riego en curso de una estacion")
-        print("4. Ver panel")
+        print("1. Iniciar un riego                      [ID o 'todas']")
+        print("2. Parar estacion (Out of Service)       [ID o 'todas']")
+        print("3. Reanudar estacion                     [ID o 'todas']")
+        print("4. Cortar el riego en curso de una estacion")
+        print("5. Ver panel")
         try:
             opcion = input("> ").strip()
             if opcion == "1":
-                bloquear_estaciones(input("Estacion (ej: WS-01, o 'todas'): "))
+                estacion = input("Estacion (ej: WS-01, o 'todas'): ")
+                iniciar_riego_central(estacion, input("Duracion en segundos: "))
             elif opcion == "2":
-                activar_estaciones(input("Estacion (ej: WS-01, o 'todas'): "))
+                bloquear_estaciones(input("Estacion (ej: WS-01, o 'todas'): "))
             elif opcion == "3":
-                cortar_riego(input("Estacion (ej: WS-01): "))
+                activar_estaciones(input("Estacion (ej: WS-01, o 'todas'): "))
             elif opcion == "4":
+                cortar_riego(input("Estacion (ej: WS-01): "))
+            elif opcion == "5":
                 mostrar_panel()
             elif opcion:
                 print("Opcion no valida")

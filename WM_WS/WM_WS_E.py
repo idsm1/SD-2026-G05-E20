@@ -19,6 +19,8 @@ Qué hace:
   5. Si el monitor se cae, para el riego y reintenta conectar cada 3 s.
 """
 
+import json
+import os
 import random
 import socket
 import sys
@@ -76,15 +78,58 @@ def estado_act():
 # ------------------------------------------------------------- KAFKA: ENVIAR
 
 def publicar(topic, mensaje):
-    """Envía un mensaje a Kafka (la clave es el ID de la estación)."""
+    """Envía un mensaje a Kafka (la clave es el ID de la estación).
+    Devuelve True si se ha enviado bien."""
     if productor is None:
         print(f"[KAFKA] Sin conexión con el broker: no se puede enviar a {topic}")
-        return
+        return False
     try:
         productor.send(topic, key=id_estacion, value=mensaje)
         productor.flush()
+        return True
     except Exception as e:
         print(f"[KAFKA] Error enviando a {topic}: {e}")
+        return False
+
+
+def fichero_riego():
+    return f"riego_{id_estacion}.json"
+
+
+def guardar_riego_en_curso(datos):
+    try:
+        with open(fichero_riego(), "w", encoding="utf-8") as f:
+            json.dump(datos, f)
+    except OSError as e:
+        print(f"[RIEGO] No se ha podido guardar el riego en disco: {e}")
+
+
+def borrar_riego_en_curso():
+    try:
+        os.remove(fichero_riego())
+    except OSError:
+        pass
+
+
+def enviar_riego_pendiente():
+    """Al arrancar: si quedó un riego a medias (el engine se cayó), se manda su resumen."""
+    if not os.path.exists(fichero_riego()):
+        return
+    try:
+        with open(fichero_riego(), encoding="utf-8") as f:
+            datos = json.load(f)
+    except (OSError, ValueError):
+        borrar_riego_en_curso()
+        return
+    print(f"\n[RIEGO] Había un riego sin terminar (operario {datos['fo']}): "
+          f"{datos['volumen']:.1f} L en {datos['segundos']} s. Se envía el resumen a Central")
+    enviado = publicar(TOPIC_EVENTOS_WS, {"tipo": "FIN_RIEGO", "ws": id_estacion,
+                                          "riego_id": datos["riego_id"], "fo": datos["fo"],
+                                          "inicio": datos["inicio"], "volumen": datos["volumen"],
+                                          "duracion": datos["segundos"],
+                                          "motivo": "Averia del engine"})
+    if enviado:
+        borrar_riego_en_curso()
 
 
 # ------------------------------------------------------------------ RIEGO
@@ -124,6 +169,8 @@ def riego(operario, duracion, riego_id):
     inicio = time.time()
     hora_inicio = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     motivo = "Fin de tiempo"
+    en_curso = {"riego_id": riego_id, "fo": operario, "inicio": hora_inicio, "volumen": 0.0, "segundos": 0}
+    guardar_riego_en_curso(en_curso)
 
     while True:
         if fin_riego.wait(timeout=1):       # espera 1 s o hasta que nos paren
@@ -135,6 +182,9 @@ def riego(operario, duracion, riego_id):
         volumen = volumen + caudal / 60     # L/min -> litros en 1 segundo
         transcurrido = int(time.time() - inicio)
 
+        en_curso["volumen"] = round(volumen, 2)
+        en_curso["segundos"] = transcurrido
+        guardar_riego_en_curso(en_curso)
         print(f"[RIEGO] {caudal:5.1f} L/min | {volumen:6.1f} L | {transcurrido}/{duracion} s")
         publicar(TOPIC_TELEMETRIA, {"ws": id_estacion, "riego_id": riego_id, "fo": operario,
                                     "caudal": round(caudal, 2), "volumen": round(volumen, 2),
@@ -150,11 +200,10 @@ def riego(operario, duracion, riego_id):
         riego_id_actual = None
     print(f"[RIEGO] Electroválvula CERRADA ({motivo}) | {volumen:.1f} L en {duracion_real} s")
 
-    # Resumen final para Central (que se lo reenvía al operario y lo guarda en la BD)
-    publicar(TOPIC_EVENTOS_WS, {"tipo": "FIN_RIEGO", "ws": id_estacion, "riego_id": riego_id,
-                                "fo": operario, "inicio": hora_inicio,
-                                "volumen": round(volumen, 2), "duracion": duracion_real,
-                                "motivo": motivo})
+    enviado = publicar(TOPIC_EVENTOS_WS, {"tipo": "FIN_RIEGO", "ws": id_estacion, "riego_id": riego_id, "fo": operario,
+                                          "inicio": hora_inicio, "volumen": round(volumen, 2), "duracion": duracion_real, "motivo": motivo})
+    if enviado:
+        borrar_riego_en_curso()     # si no se pudo enviar, se queda para el próximo arranque
 
 
 # ------------------------------------------------------ KAFKA: ÓRDENES
@@ -256,7 +305,6 @@ def pedir_riego():
 
     if not respuesta_central.wait(timeout=ESPERA_CENTRAL):
         print("*** Imposible conectar con WM_Central ***")
-        print("    (la petición queda en Kafka: si Central vuelve en menos de 30 s, la atenderá)")
     solicitud_pendiente = None
 
 
@@ -365,6 +413,7 @@ def main():
         # (wait con timeout dentro de un bucle para que Ctrl+C funcione en Windows)
         while not kafka_listo.wait(timeout=0.5):
             pass
+        enviar_riego_pendiente()
         menu()
     except (KeyboardInterrupt, EOFError):
         pass

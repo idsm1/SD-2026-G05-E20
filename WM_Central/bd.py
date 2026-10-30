@@ -137,3 +137,13 @@ def guardar_riego(estacion, operario, inicio, duracion_s, volumen_l, motivo):
         con.commit()
     finally:
         con.close()
+
+def agua_por_estacion():
+    """Devuelve {id_estacion: litros} con el agua total de los riegos terminados."""
+    con = conectar()
+    try:
+        filas = con.execute("""
+            SELECT estacion, COALESCE(SUM(volumen_l), 0) FROM riegos GROUP BY estacion""").fetchall()
+    finally:
+        con.close()
+    return {estacion: litros for estacion, litros in filas}
