@@ -1,23 +1,35 @@
-YAML
 name: Build and Push to Docker Hub
+
 on:
- push:
-  branches:
-    -master # Asegúrate de que coincide con el nombre de tu rama principal
+  push:
+    branches:
+      - master
+
 jobs:
- build:
-  runs-on: ubuntu-latest
-  steps:
-    -name: Checkout del código
-      uses: actions/checkout@v3
-    -name: Iniciar sesión en Docker Hub
-      uses: docker/login-action@v2
-      with:
-        username: ${{ secrets.DOCKER_USERNAME }}
-        password: ${{ secrets.DOCKER_PASSWORD }}
-    -name: Construir y subir imagen
-      uses: docker/build-push-action@v4
-      with:
-        context: .
-        push: true
-        tags: ${{ secrets.DOCKER_USERNAME }}/practica-aws:latest
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - carpeta: WM_Central
+            imagen: wm-central
+          - carpeta: WM_WS
+            imagen: wm-ws
+          - carpeta: WM_FO
+            imagen: wm-fo
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      - name: Iniciar sesión en Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Construir y subir ${{ matrix.imagen }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ./${{ matrix.carpeta }}
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/${{ matrix.imagen }}:latest
