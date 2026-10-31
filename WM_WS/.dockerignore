@@ -4,3 +4,4 @@ __pycache__/
 .venv/
 Dockerfile
 .dockerignore
+riego_*.json

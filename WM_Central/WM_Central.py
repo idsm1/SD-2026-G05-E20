@@ -156,7 +156,7 @@ def refrescar_panel():
 # ---------------------------------------------------------------- SERVICIOS
 
 def servicio_registro(id_estacion, ubicacion, addr):
-    """Valida los datos de la estación y la marca como DISPONIBLE.
+    """Autentica la estación (tiene que estar dada de alta en la BD) y la marca como DISPONIBLE.
     Devuelve (respuesta, registrada_ok)."""
     if not id_estacion:
         return construir_trama("STATUS", "ERROR", "Falta el ID de la estacion"), False
@@ -167,13 +167,15 @@ def servicio_registro(id_estacion, ubicacion, addr):
         return construir_trama("STATUS", "ERROR", "Falta la ubicacion"), False
 
     with lock:
-        if id_estacion in estaciones and estaciones[id_estacion]["estado"] != DESCONECTADA:
+        if id_estacion not in estaciones:       # autenticación: tiene que estar dada de alta
+            return construir_trama("STATUS", "ERROR",
+                                   f"La estacion {id_estacion} no esta dada de alta en WM_Central"), False
+        if estaciones[id_estacion]["estado"] != DESCONECTADA:
             return construir_trama("STATUS", "ERROR",
                                    f"La estacion {id_estacion} ya esta conectada"), False
-        nueva = id_estacion not in estaciones
-        bloqueada = estaciones[id_estacion]["bloqueada"] if not nueva else False
+        bloqueada = estaciones[id_estacion]["bloqueada"]
         # Si tenía un riego a medias (p. ej. se cayó solo el monitor), lo conservamos
-        riego = estaciones[id_estacion]["riego"] if not nueva else None
+        riego = estaciones[id_estacion]["riego"]
         if riego is not None:
             estado = REGANDO
         elif bloqueada:
@@ -183,9 +185,8 @@ def servicio_registro(id_estacion, ubicacion, addr):
         estaciones[id_estacion] = {"ubicacion": ubicacion, "bloqueada": bloqueada,
                                    "estado": estado, "addr": addr, "riego": riego}
 
-    bd.guardar_estacion(id_estacion, ubicacion)   # alta nueva o actualizar ubicación
-    print(f"[REGISTRO] {id_estacion} ({ubicacion}) "
-          f"{'dada de alta' if nueva else 'reconectada'} desde {addr[0]}:{addr[1]}")
+    bd.guardar_estacion(id_estacion, ubicacion)   # por si el monitor trae otra ubicación
+    print(f"[REGISTRO] {id_estacion} ({ubicacion}) autenticada desde {addr[0]}:{addr[1]}")
 
     if bloqueada:
         publicar(TOPIC_ORDENES, id_estacion, {"tipo": "BLOQUEAR", "ws": id_estacion})
@@ -536,6 +537,28 @@ def iniciar_riego_central(texto, texto_duracion):
         mostrar_panel()
 
 
+def dar_de_alta(id_ws, ubicacion):
+    """Da de alta una estación nueva en la BD. Hasta que su monitor conecte sale DESCONECTADA.
+    Solo las estaciones dadas de alta pueden registrarse (autenticarse) en Central."""
+    id_ws = id_ws.strip().upper()
+    ubicacion = ubicacion.strip()
+    if not PATRON_ID.match(id_ws):
+        print("[MENU] ID no valido. Formato: WS-<numero>")
+        return
+    if not ubicacion or "#" in ubicacion:
+        print("[MENU] Ubicacion no valida (no puede estar vacia ni tener '#')")
+        return
+    with lock:
+        if id_ws in estaciones:
+            print(f"[MENU] La estacion {id_ws} ya esta dada de alta")
+            return
+        estaciones[id_ws] = {"ubicacion": ubicacion, "bloqueada": False,
+                             "estado": DESCONECTADA, "addr": None, "riego": None}
+    bd.guardar_estacion(id_ws, ubicacion)
+    print(f"[MENU] {id_ws} ({ubicacion}) dada de alta")
+    mostrar_panel()
+
+
 def menu_central():
     """Hilo con el menú de Central. Si no hay teclado (p. ej. en Docker sin -it), se cierra."""
     time.sleep(1)       # que salgan antes los mensajes de arranque
@@ -546,6 +569,7 @@ def menu_central():
         print("3. Reanudar estacion                     [ID o 'todas']")
         print("4. Cortar el riego en curso de una estacion")
         print("5. Ver panel")
+        print("6. Dar de alta una estacion")
         try:
             opcion = input("> ").strip()
             if opcion == "1":
@@ -559,6 +583,8 @@ def menu_central():
                 cortar_riego(input("Estacion (ej: WS-01): "))
             elif opcion == "5":
                 mostrar_panel()
+            elif opcion == "6":
+                dar_de_alta(input("ID de la nueva estacion (ej: WS-05): "), input("Ubicacion: "))
             elif opcion:
                 print("Opcion no valida")
         except EOFError:

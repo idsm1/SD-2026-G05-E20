@@ -69,7 +69,8 @@ def conectar_central():
             enviar(conn, construir_trama("REGISTRO", ID_ESTACION, UBICACION))
             respuesta = recibir(conn)
         except OSError as e:
-            print(f"[CENTRAL] No disponible en {CENTRAL}:{P_CENTRAL} ({e}). Reintento en 3 s")
+            print(f"[CENTRAL] *** Imposible conectar con WM_Central *** "
+                  f"({CENTRAL}:{P_CENTRAL}: {e}). Reintento en 3 s")
             time.sleep(3)
             continue
 
@@ -106,7 +107,7 @@ def avisar_central(comando):
                     return
             except OSError:
                 pass
-            print("[CENTRAL] Conexión perdida. Reconectando...")
+            print("[CENTRAL] *** Imposible conectar con WM_Central ***: conexión perdida. Reconectando...")
             conn_central.close()
             conectar_central()
             # Central nos acaba de registrar como DISPONIBLE: si teníamos fuga, se lo recordamos

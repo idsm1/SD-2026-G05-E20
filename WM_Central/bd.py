@@ -29,6 +29,14 @@ OPERARIOS_INICIALES = [
     ("FO-20", "Operario 20"),
 ]
 
+# Estaciones que se dan de alta la primera vez (las demás, desde el menú de Central)
+ESTACIONES_INICIALES = [
+    ("WS-01", "River Park"),
+    ("WS-02", "Parque Lo Morant"),
+    ("WS-03", "Parque El Palmeral"),
+    ("WS-04", "Parque Canalejas"),
+]
+
 
 def conectar():
     return sqlite3.connect(RUTA_BD)
@@ -62,6 +70,8 @@ def crear_tablas():
         # INSERT OR IGNORE: si el operario ya existe, no hace nada
         con.executemany("INSERT OR IGNORE INTO operarios (id, nombre) VALUES (?, ?)",
                         OPERARIOS_INICIALES)
+        con.executemany("INSERT OR IGNORE INTO estaciones (id, ubicacion) VALUES (?, ?)",
+                        ESTACIONES_INICIALES)
         con.commit()
     finally:
         con.close()

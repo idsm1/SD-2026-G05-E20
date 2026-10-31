@@ -16,7 +16,8 @@ Qué hace:
      Mientras riega, envía cada segundo el caudal y el volumen (wm.telemetria).
      Al terminar, envía el resumen del riego (wm.eventos_ws).
   4. Menú por teclado: simular/arreglar una fuga, pedir un riego a Central, parar el riego.
-  5. Si el monitor se cae, para el riego y reintenta conectar cada 3 s.
+  5. Si el monitor se cae, para el riego, la estación queda AVERIADA (no admite riegos,
+     ni siquiera desde su menú) y reintenta conectar cada 3 s.
 """
 
 import json
@@ -290,6 +291,11 @@ def pedir_riego():
     """Riego pedido por un operario en el menú de la estación: se pide a Central,
     que comprueba todo y, si está bien, nos manda la orden START."""
     global solicitud_pendiente
+    with lock:
+        estado = estado_act()
+    if estado == DESCONECTADA:
+        print("*** Estación AVERIADA: sin conexión con el monitor. No se admiten riegos ***")
+        return
     operario = input("ID del operario (ej: FO-12): ").strip().upper()
     try:
         duracion = int(input("Duración del riego en segundos: ").strip())
@@ -352,7 +358,8 @@ def monitor(conn):
         atender_mon(conn)
         with lock:
             monitor_conectado = False
-        print("\n[MONITOR] Conexión perdida. Se para el riego")
+        print("\n[MONITOR] Conexión perdida. *** Estación AVERIADA ***: se para el riego "
+              "y no se admiten riegos hasta que vuelva el monitor")
         parar_riego("Sin conexion con el monitor")
 
         conn, nuevo_id = conectar_mon()
@@ -379,6 +386,8 @@ def menu():
     while True:
         with lock:
             estado = estado_act()
+        if estado == DESCONECTADA:
+            estado = "AVERIADA (sin conexión con el monitor)"
         print(f"\n--- {id_estacion} | estado: {estado} ---")
         print("1. Simular fuga / arreglar fuga")
         print("2. Pedir un riego (operario en la estación)")
