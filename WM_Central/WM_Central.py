@@ -33,6 +33,8 @@ import uuid
 from datetime import datetime
 
 import bd
+import interfaz
+from interfaz import log, NEGRITA
 from config import (TOPIC_SOLICITUDES, TOPIC_ORDENES, TOPIC_TELEMETRIA, TOPIC_EVENTOS_WS,
                     TOPIC_NOTIFICACIONES, TOPIC_ESTADO_RED,
                     DISPONIBLE, REGANDO, FUGA, FUERA_SERVICIO, DESCONECTADA,
@@ -69,6 +71,7 @@ conexiones_activas = 0
 estaciones = {}
 lock = threading.Lock()     # protege el contador y el diccionario de estaciones
 productor = None            # productor de Kafka (None mientras no hay conexión con el broker)
+estado_kafka = "conectando..."
 
 
 # ------------------------------------------------------------- KAFKA: ENVIAR
@@ -76,13 +79,13 @@ productor = None            # productor de Kafka (None mientras no hay conexión
 def publicar(topic, clave, mensaje):
     """Envía un mensaje a Kafka y espera a que el broker lo confirme."""
     if productor is None:
-        print(f"[KAFKA] Sin conexión con el broker: no se puede enviar a {topic}")
+        log(f"[KAFKA] Sin conexión con el broker: no se puede enviar a {topic}")
         return
     try:
         productor.send(topic, key=clave, value=mensaje)
         productor.flush()
     except Exception as e:
-        print(f"[KAFKA] Error enviando a {topic}: {e}")
+        log(f"[KAFKA] Error enviando a {topic}: {e}")
 
 
 def notificar(fo, tipo, ws, texto, **extra):
@@ -103,54 +106,77 @@ def publicar_estado_red(copia):
 
 # ------------------------------------------------------------------ PANEL
 
-def mostrar_panel():
-    """Muestra el estado de todas las estaciones y lo publica a los FO.
-    Llamar SIN tener el lock."""
-    with lock:
-        copia = {id_ws: dict(datos) for id_ws, datos in estaciones.items()}
+LEYENDA = {DISPONIBLE: "Disponible", REGANDO: "Regando", FUGA: "Fuga",
+           FUERA_SERVICIO: "Out of Service", DESCONECTADA: "Desconectada"}
+ANCHO_BARRA = 10            # caracteres de la barra de progreso del riego
 
-    hora = datetime.now().strftime("%H:%M:%S")
-    print()
+
+def barra_progreso(segundos, duracion):
+    llenos = min(ANCHO_BARRA, int(ANCHO_BARRA * segundos / duracion)) if duracion else 0
+    return "█" * llenos + "░" * (ANCHO_BARRA - llenos) + f" {segundos}/{duracion} s"
+
+
+def construir_panel(copia):
+    """Devuelve las líneas del panel de estaciones (con colores)."""
     agua = bd.agua_por_estacion()      # litros ya regados por cada estación (riegos terminados)
-    print("=" * 90)
-    print(f"  PANEL DE CONTROL - WM_Central                                                 {hora}")
-    print("=" * 90)
-    print(f"  {'ID':<7} {'ESTADO':<17} {'UBICACION':<18} {'AGUA TOTAL':>10} {'CAUDAL':>11} {'VOLUMEN':>9}  OPERARIO")
-    print("-" * 90)
+    lineas = [NEGRITA + f"  {'ID':<7} {'ESTADO':<16}{'UBICACION':<19}{'AGUA TOTAL':>10}"
+              f"{'CAUDAL':>12}{'VOLUMEN':>10}  {'OPERARIO':<8} PROGRESO" + RESET]
     if not copia:
-        print("  (no hay estaciones registradas)")
+        lineas.append("  (no hay estaciones dadas de alta: usa la opción 6 del menú)")
     for id_ws in sorted(copia):
         datos = copia[id_ws]
         estado = datos["estado"]
-        texto_estado = "Out of Service" if estado == FUERA_SERVICIO else estado
-        color = COLORES.get(estado, "")
         riego = datos["riego"]
         total = agua.get(id_ws, 0.0) + (riego.get("volumen", 0.0) if riego else 0.0)
-        linea = (f"  {color} {id_ws:<6} {texto_estado:<17}{RESET} {datos['ubicacion'][:18]:<18}"
-                 f" {total:8.1f} L")
+        linea = (f"  {id_ws:<7}{COLORES.get(estado, '')} {LEYENDA.get(estado, estado):<14} {RESET} "
+                 f"{datos['ubicacion'][:18]:<19}{total:8.1f} L")
         if estado == REGANDO and riego is not None:
-            linea += (f" {riego['caudal']:5.1f} L/min {riego['volumen']:7.1f} L  {riego['fo']}"
-                      f"  ({riego['segundos']}/{riego['duracion']} s)")
-        print(linea)
-    print("=" * 90)
-    print()
+            linea += (f"{riego.get('caudal', 0.0):6.1f} L/min{riego.get('volumen', 0.0):8.1f} L"
+                      f"  {riego['fo']:<8} "
+                      f"{barra_progreso(riego.get('segundos', 0), riego['duracion'])}")
+        lineas.append(linea)
+    leyenda = "   ".join(f"{COLORES[e]} {LEYENDA[e]} {RESET}" for e in LEYENDA)
+    lineas += ["", "  " + leyenda]
+    return lineas
 
-    publicar_estado_red(copia)
+
+def texto_cabecera():
+    with lock:
+        monitores = sum(1 for d in estaciones.values() if d["estado"] != DESCONECTADA)
+    return (f"WM_Central  ·  Puerto {PORT}  ·  Kafka {BROKER} {estado_kafka}  ·  "
+            f"{monitores} estaciones conectadas  ·  {datetime.now().strftime('%H:%M:%S')}")
+
+
+def mostrar_panel(publicar_red=True):
+    """Actualiza el panel de la pantalla y (si se pide) publica el estado a los FO.
+    Llamar SIN tener el lock."""
+    with lock:
+        copia = {id_ws: dict(datos) for id_ws, datos in estaciones.items()}
+    interfaz.cabecera(texto_cabecera())
+    interfaz.panel(construir_panel(copia))
+    if publicar_red:
+        publicar_estado_red(copia)
 
 
 def refrescar_panel():
-    """Hilo: cada pocos segundos
-      - si alguna estación riega, repinta el panel (caudal y volumen en tiempo real)
-      - si no, solo vuelve a publicar el estado de la red (para los FO que acaban de abrir)"""
+    """Hilo:
+      - cada segundo actualiza la pantalla (caudal, volumen y progreso en tiempo real)
+      - cada REFRESCO_PANEL segundos publica el estado de la red para los FO
+    En modo simple (sin terminal) solo se imprime el panel si alguna estación riega."""
+    vuelta = 0
     while True:
-        time.sleep(REFRESCO_PANEL)
-        with lock:
-            alguna_regando = any(d["estado"] == REGANDO for d in estaciones.values())
-            copia = {id_ws: dict(datos) for id_ws, datos in estaciones.items()}
-        if alguna_regando:
-            mostrar_panel()
-        elif productor is not None:
-            publicar_estado_red(copia)
+        time.sleep(1)
+        vuelta += 1
+        if interfaz.PANTALLA:
+            mostrar_panel(publicar_red=False)
+        if vuelta % REFRESCO_PANEL == 0:
+            with lock:
+                alguna_regando = any(d["estado"] == REGANDO for d in estaciones.values())
+                copia = {id_ws: dict(datos) for id_ws, datos in estaciones.items()}
+            if not interfaz.PANTALLA and alguna_regando:
+                mostrar_panel()
+            else:
+                publicar_estado_red(copia)
 
 
 # ---------------------------------------------------------------- SERVICIOS
@@ -186,7 +212,7 @@ def servicio_registro(id_estacion, ubicacion, addr):
                                    "estado": estado, "addr": addr, "riego": riego}
 
     bd.guardar_estacion(id_estacion, ubicacion)   # por si el monitor trae otra ubicación
-    print(f"[REGISTRO] {id_estacion} ({ubicacion}) autenticada desde {addr[0]}:{addr[1]}")
+    log(f"[REGISTRO] {id_estacion} ({ubicacion}) autenticada desde {addr[0]}:{addr[1]}")
 
     if bloqueada:
         publicar(TOPIC_ORDENES, id_estacion, {"tipo": "BLOQUEAR", "ws": id_estacion})
@@ -244,11 +270,11 @@ def procesar(trama, addr, id_conexion):
                                    f"Formato incorrecto. Usa {comando}#{id_conexion}"), id_conexion
         if comando == "FUGA":
             cambiar_estado(id_conexion, FUGA)
-            print(f"[AVERIA] {id_conexion}: FUGA detectada por el monitor")
+            log(f"[AVERIA] {id_conexion}: FUGA detectada por el monitor")
             avisar_si_regando(id_conexion, f"FUGA detectada en {id_conexion}: el riego se corta")
         else:
             cambiar_estado(id_conexion, DISPONIBLE)
-            print(f"[AVERIA] {id_conexion}: averia resuelta, vuelve a estar disponible")
+            log(f"[AVERIA] {id_conexion}: averia resuelta, vuelve a estar disponible")
         return construir_trama("STATUS", "OK", f"{comando} recibido"), id_conexion
 
     return construir_trama("STATUS", "ERROR", f"Comando desconocido: {comando}"), id_conexion
@@ -258,7 +284,7 @@ def procesar(trama, addr, id_conexion):
 
 def atender_cliente(conn, addr):
     global conexiones_activas
-    print(f"[NUEVA CONEXIÓN] {addr} conectado.")
+    log(f"[NUEVA CONEXIÓN] {addr} conectado.")
     id_conexion = None      # qué estación es este monitor (se sabe al registrarse)
     conn.settimeout(TIMEOUT_MONITOR)
     try:
@@ -269,21 +295,21 @@ def atender_cliente(conn, addr):
 
             es_ping = trama.upper().startswith("PING")
             if not es_ping:                    # el latido no se muestra, sería cada 5 s
-                print(f"[{addr}] Trama recibida: {trama}")
+                log(f"[{addr}] Trama recibida: {trama}")
             respuesta, id_conexion = procesar(trama, addr, id_conexion)
             if not es_ping:
-                print(f"[{addr}] Respuesta: {respuesta}")
+                log(f"[{addr}] Respuesta: {respuesta}")
             enviar(conn, respuesta)
 
             if respuesta.startswith("STATUS#OK") and not es_ping:   # algo ha cambiado
                 mostrar_panel()
     except socket.timeout:
-        print(f"[TIMEOUT] {addr}: {TIMEOUT_MONITOR} s sin recibir nada del monitor")
+        log(f"[TIMEOUT] {addr}: {TIMEOUT_MONITOR} s sin recibir nada del monitor")
     except (ConnectionResetError, BrokenPipeError, OSError):
         pass
     finally:
         conn.close()
-        print(f"[DESCONEXIÓN] {addr} ({id_conexion or 'sin registrar'})")
+        log(f"[DESCONEXIÓN] {addr} ({id_conexion or 'sin registrar'})")
         if id_conexion is not None:
             cambiar_estado(id_conexion, DESCONECTADA)
             avisar_si_regando(id_conexion, f"Se ha perdido la conexión con {id_conexion}")
@@ -296,7 +322,7 @@ def atender_cliente(conn, addr):
 
 def denegar(solicitud, motivo):
     """Avisa al operario (y a la estación, si la petición vino de su menú) de que no se riega."""
-    print(f"[SOLICITUD] DENEGADA: {motivo}")
+    log(f"[SOLICITUD] DENEGADA: {motivo}")
     notificar(solicitud["fo"], "DENEGADO", solicitud["ws"], motivo, riego_id=solicitud["id"])
     if solicitud.get("origen") == "WS":
         publicar(TOPIC_ORDENES, solicitud["ws"],
@@ -310,7 +336,7 @@ def procesar_solicitud(solicitud):
     ws = solicitud["ws"]
     fo = solicitud["fo"]
     duracion = int(solicitud["duracion"])
-    print(f"\n[SOLICITUD] {fo} pide regar en {ws} durante {duracion} s "
+    log(f"[SOLICITUD] {fo} pide regar en {ws} durante {duracion} s "
           f"(desde {'la app FO' if solicitud.get('origen') == 'FO' else 'el menú de la estación'})")
 
     # 1. ¿Es demasiado vieja? (p. ej. se pidió mientras Central estaba caída)
@@ -343,7 +369,7 @@ def procesar_solicitud(solicitud):
         return
 
     # 4. Todo correcto: avisamos al operario y damos la orden a la estación
-    print(f"[SOLICITUD] AUTORIZADA: {ws} empieza a regar para {fo}")
+    log(f"[SOLICITUD] AUTORIZADA: {ws} empieza a regar para {fo}")
     notificar(fo, "AUTORIZADO", ws, f"Riego autorizado en {ws} durante {duracion} s",
               riego_id=solicitud["id"])
     publicar(TOPIC_ORDENES, ws, {"tipo": "START", "ws": ws, "riego_id": solicitud["id"],
@@ -370,7 +396,7 @@ def procesar_telemetria(dato):
             riego = {"id": dato["riego_id"], "fo": dato["fo"], "duracion": dato["duracion"]}
             estaciones[ws]["riego"] = riego
             estaciones[ws]["estado"] = REGANDO
-            print(f"[RIEGO] Recuperado el riego en curso de {ws} (operario {dato['fo']})")
+            log(f"[RIEGO] Recuperado el riego en curso de {ws} (operario {dato['fo']})")
         elif riego["id"] != dato["riego_id"]:
             return                     # dato de un riego antiguo: no nos interesa
         riego["caudal"] = dato["caudal"]
@@ -407,7 +433,7 @@ def procesar_evento(evento):
     fo = evento["fo"]
 
     if evento["tipo"] == "FIN_RIEGO":
-        print(f"\n[RIEGO] {ws} ha terminado ({evento['motivo']}): "
+        log(f"[RIEGO] {ws} ha terminado ({evento['motivo']}): "
               f"{evento['volumen']:.1f} L en {evento['duracion']} s")
         terminar_riego(ws, evento["riego_id"])
         bd.guardar_riego(ws, fo, evento["inicio"], evento["duracion"],
@@ -420,7 +446,7 @@ def procesar_evento(evento):
         mostrar_panel()
 
     elif evento["tipo"] == "RECHAZADO":
-        print(f"\n[RIEGO] {ws} ha rechazado el riego: {evento['motivo']}")
+        log(f"[RIEGO] {ws} ha rechazado el riego: {evento['motivo']}")
         terminar_riego(ws, evento["riego_id"])
         notificar(fo, "DENEGADO", ws, f"La estacion ha rechazado el riego: {evento['motivo']}",
                   riego_id=evento["riego_id"])
@@ -446,7 +472,7 @@ def bloquear_estaciones(texto):
     Si estaba regando, el engine corta el riego y nos manda el FIN_RIEGO."""
     ids, destino = elegir_estaciones(texto)
     if ids is None:
-        print(f"[MENU] La estacion {texto.strip().upper()} no existe")
+        log(f"[MENU] La estacion {texto.strip().upper()} no existe")
         return
     regando = []
     with lock:
@@ -465,7 +491,7 @@ def bloquear_estaciones(texto):
                   f"{id_ws} ha sido puesta fuera de servicio por Central: el riego se corta",
                   riego_id=riego["id"])
     publicar(TOPIC_ORDENES, destino, {"tipo": "BLOQUEAR", "ws": destino})
-    print(f"[MENU] Fuera de servicio: {', '.join(ids) if ids else '(ninguna)'}")
+    log(f"[MENU] Fuera de servicio: {', '.join(ids) if ids else '(ninguna)'}")
     mostrar_panel()
 
 
@@ -473,7 +499,7 @@ def activar_estaciones(texto):
     """Reanudar: la estación (o todas) vuelve a estar disponible."""
     ids, destino = elegir_estaciones(texto)
     if ids is None:
-        print(f"[MENU] La estacion {texto.strip().upper()} no existe")
+        log(f"[MENU] La estacion {texto.strip().upper()} no existe")
         return
     with lock:
         for id_ws in ids:
@@ -484,7 +510,7 @@ def activar_estaciones(texto):
     for id_ws in ids:
         bd.guardar_bloqueo(id_ws, False)
     publicar(TOPIC_ORDENES, destino, {"tipo": "ACTIVAR", "ws": destino})
-    print(f"[MENU] Reactivadas: {', '.join(ids) if ids else '(ninguna)'}")
+    log(f"[MENU] Reactivadas: {', '.join(ids) if ids else '(ninguna)'}")
     mostrar_panel()
 
 
@@ -494,12 +520,12 @@ def cortar_riego(texto):
     with lock:
         riego = estaciones[id_ws]["riego"] if id_ws in estaciones else None
     if riego is None:
-        print(f"[MENU] {id_ws} no esta regando")
+        log(f"[MENU] {id_ws} no esta regando")
         return
     notificar(riego["fo"], "AVISO", id_ws, f"Central ha cortado el riego en {id_ws}",
               riego_id=riego["id"])
     publicar(TOPIC_ORDENES, id_ws, {"tipo": "STOP", "ws": id_ws, "riego_id": riego["id"]})
-    print(f"[MENU] Orden STOP enviada a {id_ws} (el resumen llegará al terminar)")
+    log(f"[MENU] Orden STOP enviada a {id_ws} (el resumen llegará al terminar)")
 
 
 def iniciar_riego_central(texto, texto_duracion):
@@ -508,21 +534,21 @@ def iniciar_riego_central(texto, texto_duracion):
     try:
         duracion = int(texto_duracion)
     except ValueError:
-        print("[MENU] La duracion tiene que ser un numero")
+        log("[MENU] La duracion tiene que ser un numero")
         return
     if duracion <= 0:
-        print("[MENU] La duracion tiene que ser mayor que 0")
+        log("[MENU] La duracion tiene que ser mayor que 0")
         return
     ids, destino = elegir_estaciones(texto)
     if ids is None:
-        print(f"[MENU] La estacion {texto.strip().upper()} no existe")
+        log(f"[MENU] La estacion {texto.strip().upper()} no existe")
         return
 
     ordenes = []
     with lock:
         for id_ws in ids:
             if estaciones[id_ws]["estado"] != DISPONIBLE:
-                print(f"[MENU] {id_ws} no esta disponible ({estaciones[id_ws]['estado']})")
+                log(f"[MENU] {id_ws} no esta disponible ({estaciones[id_ws]['estado']})")
                 continue
             riego_id = str(uuid.uuid4())[:8]
             estaciones[id_ws]["estado"] = REGANDO
@@ -532,7 +558,7 @@ def iniciar_riego_central(texto, texto_duracion):
     for id_ws, riego_id in ordenes:
         publicar(TOPIC_ORDENES, id_ws, {"tipo": "START", "ws": id_ws, "riego_id": riego_id,
                                         "fo": "CENTRAL", "duracion": duracion})
-        print(f"[MENU] Riego iniciado en {id_ws} durante {duracion} s")
+        log(f"[MENU] Riego iniciado en {id_ws} durante {duracion} s")
     if ordenes:
         mostrar_panel()
 
@@ -543,76 +569,77 @@ def dar_de_alta(id_ws, ubicacion):
     id_ws = id_ws.strip().upper()
     ubicacion = ubicacion.strip()
     if not PATRON_ID.match(id_ws):
-        print("[MENU] ID no valido. Formato: WS-<numero>")
+        log("[MENU] ID no valido. Formato: WS-<numero>")
         return
     if not ubicacion or "#" in ubicacion:
-        print("[MENU] Ubicacion no valida (no puede estar vacia ni tener '#')")
+        log("[MENU] Ubicacion no valida (no puede estar vacia ni tener '#')")
         return
     with lock:
         if id_ws in estaciones:
-            print(f"[MENU] La estacion {id_ws} ya esta dada de alta")
+            log(f"[MENU] La estacion {id_ws} ya esta dada de alta")
             return
         estaciones[id_ws] = {"ubicacion": ubicacion, "bloqueada": False,
                              "estado": DESCONECTADA, "addr": None, "riego": None}
     bd.guardar_estacion(id_ws, ubicacion)
-    print(f"[MENU] {id_ws} ({ubicacion}) dada de alta")
+    log(f"[MENU] {id_ws} ({ubicacion}) dada de alta")
     mostrar_panel()
 
+OPCIONES_MENU = [("1", "Iniciar riego"), ("2", "Parar"), ("3", "Reanudar"), ("4", "Cortar riego"), ("5", "Redibujar"), ("6", "Alta estación")]
+LINEAS_MENU = ["  " + "  ".join(f"{NEGRITA}[{n}]{RESET} {texto}" for n, texto in OPCIONES_MENU)]
 
 def menu_central():
     """Hilo con el menú de Central. Si no hay teclado (p. ej. en Docker sin -it), se cierra."""
     time.sleep(1)       # que salgan antes los mensajes de arranque
+    interfaz.menu(LINEAS_MENU)
     while True:
-        print("\n--- MENU WM_Central ---")
-        print("1. Iniciar un riego                      [ID o 'todas']")
-        print("2. Parar estacion (Out of Service)       [ID o 'todas']")
-        print("3. Reanudar estacion                     [ID o 'todas']")
-        print("4. Cortar el riego en curso de una estacion")
-        print("5. Ver panel")
-        print("6. Dar de alta una estacion")
+        if not interfaz.PANTALLA:
+            print("\n".join(LINEAS_MENU) + RESET)
         try:
-            opcion = input("> ").strip()
+            opcion = interfaz.pedir("> ").strip()
             if opcion == "1":
-                estacion = input("Estacion (ej: WS-01, o 'todas'): ")
-                iniciar_riego_central(estacion, input("Duracion en segundos: "))
+                estacion = interfaz.pedir("Estación (ej: WS-01, o 'todas'): ")
+                iniciar_riego_central(estacion, interfaz.pedir("Duración en segundos: "))
             elif opcion == "2":
-                bloquear_estaciones(input("Estacion (ej: WS-01, o 'todas'): "))
+                bloquear_estaciones(interfaz.pedir("Estación a parar (ej: WS-01, o 'todas'): "))
             elif opcion == "3":
-                activar_estaciones(input("Estacion (ej: WS-01, o 'todas'): "))
+                activar_estaciones(interfaz.pedir("Estación a reanudar (ej: WS-01, o 'todas'): "))
             elif opcion == "4":
-                cortar_riego(input("Estacion (ej: WS-01): "))
+                cortar_riego(interfaz.pedir("Estación (ej: WS-01): "))
             elif opcion == "5":
-                mostrar_panel()
+                interfaz.redibujar_todo()
+                mostrar_panel(publicar_red=False)
             elif opcion == "6":
-                dar_de_alta(input("ID de la nueva estacion (ej: WS-05): "), input("Ubicacion: "))
+                id_ws = interfaz.pedir("ID de la nueva estación (ej: WS-05): ")
+                dar_de_alta(id_ws, interfaz.pedir("Ubicación: "))
             elif opcion:
-                print("Opcion no valida")
+                log(f"[MENU] Opción no válida: {opcion}")
         except EOFError:
-            print("[MENU] Sin entrada por teclado: el menu de Central queda desactivado")
+            log("[MENU] Sin entrada por teclado: el menú de Central queda desactivado")
             return
 
 # ------------------------------------------------------ KAFKA: HILO LECTOR
 
 def conectar_kafka():
     """Se conecta al broker. Si no está, reintenta cada 5 s (los sockets siguen funcionando)."""
-    global productor
+    global productor, estado_kafka
     while True:
         try:
             crear_topics(BROKER)
             productor = crear_productor(BROKER)
             # Grupo "central" y 'earliest': si Central se cae, al volver lee lo que se perdió
-            consumidor = crear_consumidor(BROKER,
-                                          [TOPIC_SOLICITUDES, TOPIC_TELEMETRIA, TOPIC_EVENTOS_WS],
-                                          "central", "earliest")
-            print(f"[KAFKA] Conectado al broker {BROKER}")
+            consumidor = crear_consumidor(BROKER, [TOPIC_SOLICITUDES, TOPIC_TELEMETRIA, TOPIC_EVENTOS_WS], "central", "earliest")
+            estado_kafka = "conectado"
+            log(f"[KAFKA] Conectado al broker {BROKER}")
             return consumidor
         except Exception as e:
-            print(f"[KAFKA] Broker {BROKER} no disponible ({e}). Reintento en 5 s")
+            estado_kafka = "NO DISPONIBLE"
+            log(f"[KAFKA] Broker {BROKER} no disponible ({e}). Reintento en 5 s")
             time.sleep(5)
 
 
 def escuchar_kafka():
     """Hilo que lee los mensajes de Kafka y llama a la función que toca según el topic."""
+    global estado_kafka
     consumidor = conectar_kafka()
     mostrar_panel()
     while True:
@@ -620,9 +647,13 @@ def escuchar_kafka():
         try:
             lotes = consumidor.poll(timeout_ms=1000, max_records=1)
         except Exception as e:
-            print(f"KAFKA Sin conexión con el broker ({e}).")
+            estado_kafka = "SIN CONEXIÓN"
+            log(f"KAFKA Sin conexión con el broker ({e}). Reintentando en 5s")
             time.sleep(5)
             continue
+        if estado_kafka != "conectado":
+            estado_kafka = "conectado"
+            log("[KAFKA] Conexión con el broker recuperada")
         for mensajes in lotes.values():
             for msg in mensajes:
                 try:
@@ -633,19 +664,19 @@ def escuchar_kafka():
                     elif msg.topic == TOPIC_EVENTOS_WS:
                         procesar_evento(msg.value)
                 except (KeyError, ValueError, TypeError) as e:
-                    print(f"[KAFKA] Mensaje mal formado en {msg.topic}: {msg.value} ({e})")
+                    log(f"[KAFKA] Mensaje mal formado en {msg.topic}: {msg.value} ({e})")
         if lotes:
             try:
                 consumidor.commit()
             except Exception as e:
-                print(f"[KAFKA] No se ha podido confirmar el mensaje ({e})")     
+                log(f"[KAFKA] No se ha podido confirmar el mensaje ({e})")     
 
 
 # ------------------------------------------------------------------ MAIN
 
 def start():
     global conexiones_activas
-    os.system("")   # en Windows activa los colores ANSI en la consola
+    interfaz.iniciar()
 
     # Base de datos: crear tablas si hace falta y cargar las estaciones conocidas
     bd.crear_tablas()
@@ -658,10 +689,11 @@ def start():
     server.bind(ADDR)
     server.listen()
 
-    print("[STARTING] WM_Central inicializándose...")
-    print(f"[LISTENING] Escuchando en el puerto {PORT}")
-    print(f"[BD] {bd.RUTA_BD}: {len(estaciones)} estaciones, "
-          f"operarios: {', '.join(bd.cargar_operarios())}")
+    log("[STARTING] WM_Central inicializándose...")
+    log(f"[LISTENING] Escuchando en el puerto {PORT}")
+    log(f"[BD] {bd.RUTA_BD}: {len(estaciones)} estaciones, "f"operarios: {', '.join(bd.cargar_operarios())}")
+
+    mostrar_panel(publicar_red=False)
 
     threading.Thread(target=escuchar_kafka, daemon=True).start()
     threading.Thread(target=refrescar_panel, daemon=True).start()
@@ -680,14 +712,15 @@ def start():
                                         args=(conn, addr), daemon=True)
                 hilo.start()
             else:
-                print(f"[RECHAZADO] {addr}: demasiadas conexiones")
+                log(f"[RECHAZADO] {addr}: demasiadas conexiones")
                 enviar(conn, construir_trama("STATUS", "ERROR",
                                              "Demasiadas conexiones. Intentalo mas tarde"))
                 conn.close()
     except KeyboardInterrupt:
-        print("\n[STOP] WM_Central detenido")
+        log("\n[STOP] WM_Central detenido")
     finally:
         server.close()
+        interfaz.terminar()
 
 
 if __name__ == "__main__":
