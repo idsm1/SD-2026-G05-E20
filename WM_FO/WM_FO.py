@@ -92,7 +92,12 @@ def escuchar_kafka(consumidor):
     """Hilo que lee las notificaciones de este operario y el estado de la red."""
     global estado_red, ultimo_estado_red, central_viva
     while True:
-        lotes = consumidor.poll(timeout_ms=1000, max_records=1)
+        try:
+            lotes = consumidor.poll(timeout_ms=1000, max_records=1)
+        except Exception as e:
+            print(f"KAFKA Sin conexión con el broker ({e}).")
+            time.sleep(5)
+            continue
         if not kafka_listo.is_set() and consumidor.assignment():
             kafka_listo.set()
         for mensajes in lotes.values():
@@ -111,7 +116,10 @@ def escuchar_kafka(consumidor):
                 except (KeyError, ValueError, TypeError) as e:
                     print(f"[KAFKA] Mensaje mal formado: {msg.value} ({e})")
         if lotes:
-            consumidor.commit()
+            try:
+                consumidor.commit()
+            except Exception as e:
+                print(f"[KAFKA] No se ha podido confirmar el mensaje ({e})")
 
 
 def vigilar_central():

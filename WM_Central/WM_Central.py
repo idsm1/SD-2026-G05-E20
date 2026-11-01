@@ -591,7 +591,12 @@ def escuchar_kafka():
     mostrar_panel()
     while True:
         # max_records=1: procesamos de uno en uno y confirmamos (commit) cada uno
-        lotes = consumidor.poll(timeout_ms=1000, max_records=1)
+        try:
+            lotes = consumidor.poll(timeout_ms=1000, max_records=1)
+        except Exception as e:
+            print(f"KAFKA Sin conexión con el broker ({e}).")
+            time.sleep(5)
+            continue
         for mensajes in lotes.values():
             for msg in mensajes:
                 try:
@@ -604,7 +609,10 @@ def escuchar_kafka():
                 except (KeyError, ValueError, TypeError) as e:
                     print(f"[KAFKA] Mensaje mal formado en {msg.topic}: {msg.value} ({e})")
         if lotes:
-            consumidor.commit()        # ya está procesado: Kafka no nos lo volverá a dar
+            try:
+                consumidor.commit()
+            except Exception as e:
+                print(f"[KAFKA] No se ha podido confirmar el mensaje ({e})")     
 
 
 # ------------------------------------------------------------------ MAIN

@@ -270,7 +270,12 @@ def escuchar_ordenes():
     """Hilo que lee las órdenes de Central y se queda solo con las de esta estación."""
     consumidor = conectar_kafka()
     while True:
-        lotes = consumidor.poll(timeout_ms=1000, max_records=1)
+        try:
+            lotes = consumidor.poll(timeout_ms=1000, max_records=1)
+        except Exception as e:
+            print(f"KAFKA Sin conexión con el broker ({e}).")
+            time.sleep(5)
+            continue
         if not kafka_listo.is_set() and consumidor.assignment():
             print(f"[KAFKA] Conectado al broker {BROKER}, esperando órdenes de Central")
             kafka_listo.set()
@@ -283,7 +288,10 @@ def escuchar_ordenes():
                     except (KeyError, ValueError, TypeError) as e:
                         print(f"[KAFKA] Orden mal formada: {orden} ({e})")
         if lotes:
-            consumidor.commit()
+            try:
+                consumidor.commit()
+            except Exception as e:
+                print(f"[KAFKA] No se ha podido confirmar el mensaje ({e})")
 
 
 def pedir_riego():
