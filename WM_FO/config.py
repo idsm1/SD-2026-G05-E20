@@ -13,6 +13,9 @@ from kafka import KafkaConsumer, KafkaProducer
 from kafka.admin import KafkaAdminClient
 from kafka.serializer import DefaultSerializer, JsonSerializer
 
+import os 
+ESPERA = int(os.environ.get("WM_ESPERA", "30"))
+
 # ------------------------------------------------------------------ TOPICS
 TOPIC_SOLICITUDES = "wm.solicitudes"      # FO / engine (riego manual) -> Central
 TOPIC_ORDENES = "wm.ordenes"              # Central -> engines (START, STOP, BLOQUEAR, ACTIVAR, DENEGADO)

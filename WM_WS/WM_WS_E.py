@@ -32,7 +32,7 @@ from datetime import datetime
 
 from config import (TOPIC_SOLICITUDES, TOPIC_ORDENES, TOPIC_TELEMETRIA, TOPIC_EVENTOS_WS,
                     DISPONIBLE, REGANDO, FUGA, FUERA_SERVICIO, DESCONECTADA,
-                    crear_topics, crear_productor, crear_consumidor)
+                    crear_topics, crear_productor, crear_consumidor, ESPERA)
 from protocolo import enviar, recibir, separar_trama
 
 
@@ -46,7 +46,7 @@ P_MONITOR = int(sys.argv[4])
 
 CAUDAL_MIN = 5.0       # L/min
 CAUDAL_MAX = 10.0
-ESPERA_CENTRAL = 10    # s que esperamos la respuesta de Central a una petición de riego
+ESPERA_CENTRAL = ESPERA    # s que esperamos la respuesta de Central a una petición de riego
 
 id_estacion = None
 salud_ok = True               # False = fuga simulada (se responde KO al monitor)

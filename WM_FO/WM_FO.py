@@ -24,7 +24,7 @@ import time
 import uuid
 
 from config import (TOPIC_SOLICITUDES, TOPIC_NOTIFICACIONES, TOPIC_ESTADO_RED, DISPONIBLE,
-                    crear_topics, crear_productor, crear_consumidor)
+                    crear_topics, crear_productor, crear_consumidor, ESPERA)
 
 # ---------------------------------------------------------- CONFIGURACIÓN
 
@@ -36,10 +36,10 @@ BROKER = f"{sys.argv[1]}:{sys.argv[2]}"
 ID_FO = sys.argv[3].upper()
 FICHERO = sys.argv[4] if len(sys.argv) > 4 else None
 
-ESPERA_RESPUESTA = 10    # s que esperamos a que Central autorice o deniegue
+ESPERA_RESPUESTA = ESPERA   # s que esperamos a que Central autorice o deniegue
 ESPERA_ENTRE_FICHERO = 4  # s entre una solicitud del fichero y la siguiente
 MARGEN_FIN = 30         # s de más que esperamos el resumen después de la duración del riego
-SILENCIO_CENTRAL = 10   # s sin recibir el estado de la red (Central lo envía cada 3 s) -> Central caída
+SILENCIO_CENTRAL = ESPERA   # s sin recibir el estado de la red (Central lo envía cada 3 s) -> Central caída
 
 # ---------------------------------------------------------------- ESTADO
 

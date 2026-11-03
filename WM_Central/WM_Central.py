@@ -38,7 +38,7 @@ from interfaz import log, NEGRITA
 from config import (TOPIC_SOLICITUDES, TOPIC_ORDENES, TOPIC_TELEMETRIA, TOPIC_EVENTOS_WS,
                     TOPIC_NOTIFICACIONES, TOPIC_ESTADO_RED,
                     DISPONIBLE, REGANDO, FUGA, FUERA_SERVICIO, DESCONECTADA,
-                    crear_topics, crear_productor, crear_consumidor)
+                    crear_topics, crear_productor, crear_consumidor, ESPERA)
 from protocolo import enviar, recibir, construir_trama, separar_trama
 
 # ---------------------------------------------------------- CONFIGURACIÓN
@@ -50,7 +50,7 @@ ADDR = (SERVER, PORT)
 MAX_CONEXIONES = 10
 
 PATRON_ID = re.compile(r'^WS-\d+$')   # ej: WS-04
-CADUCIDAD_SOLICITUD = 10    # s: una solicitud más vieja se deniega (el FO y la WS esperan 10 s y
+CADUCIDAD_SOLICITUD = ESPERA    # s: una solicitud más vieja se deniega (el FO y la WS esperan 10 s y
                             # luego dicen "Imposible conectar": no se puede atender después)
 TIMEOUT_MONITOR = 15        # s sin recibir nada de un monitor -> DESCONECTADA
 REFRESCO_PANEL = 3          # s entre repintados del panel mientras alguna estación riega
