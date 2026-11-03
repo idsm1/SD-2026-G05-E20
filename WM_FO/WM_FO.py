@@ -93,7 +93,7 @@ def escuchar_kafka(consumidor):
     global estado_red, ultimo_estado_red, central_viva
     while True:
         try:
-            lotes = consumidor.poll(timeout_ms=1000, max_records=1)
+            lotes = consumidor.poll(timeout_ms=1000, max_records=500)
         except Exception as e:
             print(f"KAFKA Sin conexión con el broker ({e}).")
             time.sleep(5)
