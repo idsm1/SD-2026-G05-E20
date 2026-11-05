@@ -1,0 +1,135 @@
+-- Prompts de daiyaan
+
+CONTEXTO GENERAL · FORMA DE TRABAJO
+
+01. Hay partes de esto que todavía no sé programar yo solo. Quiero ir poco a poco y entender cómo funciona el código, para poder aprender y modificar cosas yo también.
+
+
+SEMANA DEL 19/10/2026 · COMMITS 3037253 Y 1a97755
+Sockets y SQLite
+
+02. Estoy intentando arreglar un fallo y es que no puedo cerrar Central con Ctrl+C.
+
+03. Ponme cómo estaban Central y Engine antes de lo del Ctrl+C, que quiero ver qué ha cambiado.
+
+04. No no, me había equivocado, ese no era el monitor, era otro número. ¿Dónde se configura eso?
+
+05. ¿Cómo se guardan las estaciones y sus estados en SQLite? ¿Dónde se consulta o cambia eso en el código?
+
+
+SEMANA DEL 26/10/2026 · COMMIT 6443351
+Organización del proyecto
+
+06. Vamos a olvidarnos de esto, que la he liado parda. Te paso lo que tengo y la guía de prácticas y me dices qué falta por hacer y lo hago.
+
+07. Pero ya tenía cosas en GitHub, ¿da igual? ¿No voy a perder lo que tenía?
+
+08. Te paso las carpetas que tengo: .git, .venv, __pycache__ y las demás. ¿Qué tengo que dejar y qué puedo borrar?
+
+09. Te paso el docker-compose.yml que tengo con Kafka. ¿Está bien así?
+
+10. ¿Así están bien las carpetas y el compose? Si está bien, hago el commit.
+
+11. Me sale «working tree clean», pero al hacer git checkout devel me da error al borrar WM_Central y WM_FO. ¿Por qué pasa?
+
+12. Quiero entender parte del codigo existente tras organizar un poco las carpetas para ver si tengo los conceptos claros.
+
+
+SEMANA DEL 26/10/2026 · COMMIT 449a396
+Integración de Kafka
+
+13. He puesto docker compose up -d y me dice que no puede conectar con Docker Desktop. ¿Qué pasa?
+
+14. Ahora ya me sale «Container kafka Running» con docker compose. ¿Entonces ya está funcionando?
+
+15. Mi compañero lo hará con AWS en vez de Railway, porque ha habido un ciberataque. ¿Eso nos cambia algo?
+
+16. ¿Qué ha cambiado en respecto a lo que teníamos antes?
+
+17. hago ya el commit y lo pruebo, o mejor lo pruebo antes?
+
+18. pip install kafka-python==3.0.11, ¿esto?
+
+19. No tengo el .venv activado ahora mismo, creo que estaba dentro.
+
+20. He puesto pip show kafka-python y dice que no lo encuentra. Al activar .venv me sale otra cosa, ¿por qué?
+
+21. ¿Ahora Kafka está en funcionamiento?
+
+22. Me refiero en el código.
+
+23. ¿Y en qué puerto está Kafka?
+
+24. Al arrancar WM_WS_E me sale que conecta con el monitor y luego con Kafka. Te paso lo que sale, ¿está bien?
+
+25. ¿Quito el import json?
+
+26. Vale, voy a hacer las pruebas que salen en la guía de corrección.
+
+
+SEMANA DEL 26/10/2026 · COMMIT 3d2e9f2
+Autenticación y estados de WS
+
+27. ¿Y lo de AWS cómo está? ¿Eso lo hace Jorge, no?
+
+28. Lo de AWS lo hace Jorge, pero no sé si Docker entra ahí también. Si va en otro Docker distinto, ¿eso qué significa, otra imagen, otros contenedores? ¿Hay que cambiar algo del código?
+
+29. Vale, pero en el Docker de WS, por ejemplo, ¿estará kafka-python, que es una imagen? ¿Y luego el código entero es otra imagen, o cómo va?
+
+30. Te paso el Dockerfile que tenemos. ¿Con esto ya estaría lo de Docker? ¿Qué hace cada línea?
+
+31. Uy, antes de nada, Jorge ha hecho estos cambios. He hecho git pull, ¿qué ha cambiado y cómo afecta a mi parte?
+
+
+DUDAS POSTERIORES DE DOCKER Y AWS · SIN COMMIT PROPIO
+
+32. Ahora mismo, ¿cómo está el Dockerfile? O sea, ¿dónde están Kafka y Central? Porque en AWS van Kafka, Central y la base de datos, y no sé si van juntos o separados.
+
+33. Vale, he probado las estaciones y el FO desde las terminales de Python y funciona. Ahora voy con Docker.
+
+34. ¿Cierro todo?
+
+35. Te paso lo que me sale con docker ps y docker build. ¿Es porque estoy dentro de la carpeta WM_WS?
+
+36. ¿Tiene que ser en diferentes terminales o da igual?
+
+37. Digo esto: cd .., docker build -t wm-ws ./WM_WS, docker build -t wm-fo ./WM_FO y docker network create wm. ¿Se hace todo seguido?
+
+38. He ejecutado docker build -t wm-ws ./WM_WS sin querer. ¿Pasa algo?
+
+39. Ahora me pone que la imagen wm-ws se ha construido. ¿Eso ya está o hay que hacer algo más?
+
+40. Al hacer docker run me dice que el nombre ws01_m ya está en uso. ¿Por qué? ¿Cómo lo arreglo?
+
+41. ¿Y si lo he cerrado con Ctrl+C, cómo lo abro de nuevo?
+
+42. ¿Falla algo? Te paso lo que me sale al hacer docker run, que no sé si está bien.
+
+43. No ha muerto, sigue haciendo comprobaciones. Lo que me extraña es lo de «desconectada».
+
+
+DUDAS POSTERIORES DE FUNCIONAMIENTO · SEMANA DEL 02/11/2026 · SIN COMMIT PROPIO
+
+44. Lo del docker run -it del principio, ¿para qué sirve? Porque Jorge dice que las imágenes están en AWS y que ya se está ejecutando en Docker. ¿Eso es verdad? Porque creo que Jorge se equivoca, debemos descargarlo y ejecutarlo con las imagenes subidas al docker hub.
+
+45. ¿El --rm para qué? ¿Hace falta tener Docker Desktop instalado? Estoy en los ordenadores de la universidad.
+
+46. Sí sale docker --version.
+
+47. ¿Y tengo que poner wm-ws? ¿Dónde mira eso Jorge?
+
+48. ¿El network para qué, si con docker run ya me iba?
+
+49. ¿Y se crea para las dos terminales, no? No solo en una.
+
+50. ¿Puedo probar docker run -it --rm wm-fo con la IP de AWS desde mi ordenador? Es que en el aula el FO va súper lento y las peticiones dan timeouts.
+
+51. ¿Cómo era para matar el contenedor? Me ha vuelto a pasar lo de que el nombre ya se está usando.
+
+52. Tengo que abrir dos WS y dos Engine. ¿Hago lo del network de nuevo con otro nombre, o cómo?
+
+53. O sea, ¿para qué sirve el network?
+
+54. ¿Por qué tarda un FO en conectarse a Central a veces? Sobre todo cuando se conecta por segunda vez.
+
+55. O sea, ¿esperamos 10 segundos?
